@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
 
-export const DEFAULT_TABLES = Object.freeze(['chats', 'messages', 'projects', 'memories']);
+export const DEFAULT_TABLES = Object.freeze([
+  'dua_cloud_snapshots', 'dua_daily_usage', 'dua_imagine_usage', 'dua_voice_usage', 'dua_voice_sessions',
+  'agent_notes', 'dua_workflow_runs', 'dua_workflow_executions', 'dua_workflow_credentials',
+  'dua_workflow_automation', 'dua_workflow_deliveries', 'dua_orhan_tasks', 'dua_artifacts', 'dua_memories',
+]);
 const fail = reason => ({ ok: false, reason });
 function configuration(env) {
   const url = env.SUPABASE_URL?.trim();
@@ -64,7 +68,7 @@ export async function verifyRls({ env = process.env, fetcher = fetch, tables = D
 
 export async function main(args = process.argv.slice(2), options = {}) {
   const log = options.log || console.log;
-  if (args.length > 1 || args[0] && !args[0].startsWith('--tables=')) { log('Usage: npm run verify:rls -- [--tables=chats,messages,projects,memories]'); return 1; }
+  if (args.length > 1 || args[0] && !args[0].startsWith('--tables=')) { log(`Usage: npm run verify:rls -- [--tables=${DEFAULT_TABLES.join(',')}]`); return 1; }
   const result = await verifyRls({ ...options, ...(args[0] ? { tables: args[0].slice(9).split(',') } : {}) });
   if (result.reason) log(result.reason);
   for (const check of result.checks) log(`${check.ok ? 'PASS' : 'UNVERIFIED'} ${check.table}: read ${check.read.status ?? 'error'} — ${check.read.reason} insert ${check.insert.status ?? 'error'} — ${check.insert.reason}`);
