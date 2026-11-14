@@ -11,7 +11,9 @@ The engine is Flask. The API is a Node HTTP server. Neither serves a website.
 | Android | No `Origin`. `Authorization: Bearer <supabase access token>`. `X-Dua-Native: 1` on account calls. |
 | Browser | `Origin` must be listed in the server `WEB_ORIGINS` (exact scheme, host, and port). A `*` value is ignored. Send `Authorization: Bearer <access token>` after sign-in. |
 
-If `DUA_APP_TOKEN` is set, also send `X-Dua-App-Token` on engine calls. The Node API adds that header itself when it calls the engine.
+If `DUA_APP_TOKEN` is set, also send `X-Dua-App-Token` on engine calls. The Node API adds that header itself when it calls the engine. The same header also unlocks the full `GET /api/setup` inventory (see below).
+
+`GET /api/setup` is **owner-only for detail**. A caller with no credentials gets a coarse on/off summary: capability booleans, a configured-provider count, and the account flags. Provider names, model IDs, daily limits, per-minute prices and the "why this is off" reason strings are returned only to the owner — a matching `X-Dua-App-Token`, or a Supabase session whose `/auth/v1/user` email equals `DUA_ALLOWED_EMAIL`. This keeps the endpoint usable as a health check without letting anonymous callers map the deployment.
 
 CORS preflight is `OPTIONS` with `Access-Control-Request-Method`. A listed origin gets `204` and `Access-Control-Allow-Origin` set to that origin. Any other origin gets `403` and no allow-origin header. Requests with no `Origin` are unchanged.
 
@@ -86,7 +88,7 @@ Cloud snapshot JSON is `format: "dua-cloud-snapshot"`, `version: 1`, plus `chats
 
 | Method and path | Request | Response |
 |---|---|---|
-| `GET /api/setup` | none | `{ "providers": [], "account": {}, "search": {}, "advanced": {}, "files": {}, "imagine": {}, "voice": {}, "groups": [] }` |
+| `GET /api/setup` | none, or owner session / `X-Dua-App-Token` | Anonymous: `{ "configured": { "providers": 0, "search": false, "sync": false, "memory": true, "connectors": false, "computer": true, "imagine": false, "voice": false }, "account": { "configured": false, "deletionConfigured": false, "requireLogin": false, "ownerRestricted": false, "dailyRequestLimit": 0 } }`. Owner: the full `{ "providers": [], "account": {}, "search": {}, "advanced": {}, "files": {}, "imagine": {}, "voice": {}, "groups": [] }` inventory. |
 | `GET /api/config` | none | `{ "geminiConfigured": false, "model": "", "providers": [], "web": {}, "streaming": true, "personalization": { "personality": true }, "files": {}, "context": {}, "imagine": {}, "voice": {}, "switches": {}, "history": {}, "code": {}, "build": {}, "projects": {} }` |
 
 `switches` is `{ "agent": false, "imagine": false, "voice": false, "maintenance": { "enabled": false } }`.
