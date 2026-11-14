@@ -81,7 +81,8 @@ test('POST /api/voice/session: owner-only token mint with a durable reservation;
   assert.deepEqual(body.usage, { usedSeconds: 0, activeSeconds: 600, limitSeconds: 1800, resetAt: 1791590400 });
   assert.equal(JSON.stringify(body).includes(voiceEnv.GROK_API_KEY), false);
   const start = fetcher.find(SUPA + '/rest/v1/rpc/dua_start_voice_session')[0];
-  assert.equal(start.headers.get('authorization'), 'Bearer user-token', 'RPC runs as the owner');
+  // F-01: the quota RPC runs with the service-role key; the owner was verified before it.
+  assert.equal(start.headers.get('authorization'), 'Bearer ' + voiceEnv.SUPABASE_SERVICE_ROLE_KEY);
   assert.deepEqual({ ...start.json, session_id: 'x' }, { session_id: 'x', reserve_seconds: 600, daily_limit_seconds: 1800, min_seconds: 30 });
   const mint = fetcher.find('https://api.x.ai/v1/realtime/client_secrets')[0];
   assert.equal(mint.headers.get('authorization'), 'Bearer ' + voiceEnv.GROK_API_KEY);
