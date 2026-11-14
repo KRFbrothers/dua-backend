@@ -1,6 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readdir, readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { verifyRls, main, DEFAULT_TABLES } from '../scripts/verify-rls.mjs';
+
+const MIGRATIONS = fileURLToPath(new URL('../../../infra/database/migrations/', import.meta.url));
+
+test('DEFAULT_TABLES matches every table created by the migrations', async () => {
+  const files = (await readdir(MIGRATIONS)).filter(f => f.endsWith('.sql'));
+  assert.ok(files.length > 0, 'no migrations found');
+  const created = new Set();
+  for (const file of files) {
+    const sql = await readFile(MIGRATIONS + file, 'utf8');
+    for (const match of sql.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?(?:public\.)?([a-z_][a-z0-9_]*)/gi))
+      created.add(match[1].toLowerCase());
+  }
+  assert.deepEqual([...created].sort(), [...DEFAULT_TABLES].sort(),
+    'DEFAULT_TABLES drifted from infra/database/migrations \u2014 update scripts/verify-rls.mjs');
+});
 
 const env = { SUPABASE_URL: 'https://project.supabase.co', SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_mock_public_key' };
 function mock(read = () => Response.json([]), insert = () => new Response(null, { status: 403 })) {
