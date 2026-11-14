@@ -136,8 +136,9 @@ test('POST /api/imagine/image: xAI images are stored in the owner folder with th
   assert.deepEqual(fetcher.objects[data.images[0].path], PNG);
   const rpc = fetcher.rpcCalls[0];
   assert.deepEqual(rpc.json, { feature: 'image', amount: 2, daily_limit: 20 });
-  assert.equal(rpc.headers.get('authorization'), 'Bearer user-token');
-  assert.equal(rpc.headers.get('apikey'), 'sb_publishable_test');
+  // F-01: the quota RPC runs with the service-role key, never the caller's own token.
+  assert.equal(rpc.headers.get('authorization'), 'Bearer ' + imagineEnv.SUPABASE_SERVICE_ROLE_KEY);
+  assert.equal(rpc.headers.get('apikey'), imagineEnv.SUPABASE_SERVICE_ROLE_KEY);
   const upload = fetcher.calls.find(c => c.url.startsWith(SUPA + '/storage/v1/object/dua-files/'));
   assert.equal(upload.headers.get('authorization'), 'Bearer user-token');
   assert.equal(upload.headers.get('x-upsert'), 'false');
