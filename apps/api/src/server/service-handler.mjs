@@ -14,6 +14,7 @@ import { handleOrhanTasks } from '../core/orhan-tasks.mjs';
 import { handleWorkflowExecution } from '../core/workflow-execution.mjs';
 import { handleWorkflowAutomation } from '../core/workflow-automation.mjs';
 import { handleBuildPr } from '../core/build-pr.mjs';
+import { handleArtifactsMemories } from '../core/artifacts-memories.mjs';
 import { withRequestLog } from '../core/request-logging.mjs';
 import { switchResponse, killSwitches, PAUSED } from '../core/kill-switches.mjs';
 import { applyCors, corsPreflight, requestOriginAllowed } from '../core/cors.mjs';
@@ -62,6 +63,9 @@ async function routeService(request,{env=process.env,fetcher=fetch}={}) {
  // Voice (reply voices, live voice sessions): owner-only, checked inside handleVoice. Not counted as chat requests.
  if(path.startsWith('/api/voice/'))return handleVoice(request,{env,fetcher});
  if(path==='/api/build/pr')return handleBuildPr(request,{env,fetcher});
+ // Artifacts and Memory lists: owner-only (Supabase sign-in + DUA_ALLOWED_EMAIL), checked inside
+ // handleArtifactsMemories. Both resources share one handler, so one dispatch covers both.
+ if(path==='/api/artifacts'||path.startsWith('/api/artifacts/')||path==='/api/memories'||path.startsWith('/api/memories/'))return handleArtifactsMemories(request,{env,fetcher});
  if(['/api/chat','/api/search','/api/connectors/github'].includes(path)) {
   if(request.method!=='POST')return Response.json({error:'Method not allowed.'},{status:405,headers:{'Cache-Control':'no-store'}});
   const advanced=path==='/api/connectors/github';
