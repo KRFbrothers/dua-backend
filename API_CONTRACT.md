@@ -15,7 +15,9 @@ If `DUA_APP_TOKEN` is set, also send `X-Dua-App-Token` on engine calls. The Node
 
 CORS preflight is `OPTIONS` with `Access-Control-Request-Method`. A listed origin gets `204` and `Access-Control-Allow-Origin` set to that origin. Any other origin gets `403` and no allow-origin header. Requests with no `Origin` are unchanged.
 
-Sign-in for a listed browser origin returns JSON tokens, the same shape Android uses. Cookie-only routes stay same-origin: `POST /api/web/chat` and `POST /api/web/agent/action`. A separate UI should not use those two. Call the engine for Dua Agent chat.
+Sign-in for a listed browser origin returns the access token in JSON, but **never the refresh token**. The refresh token is set as an `HttpOnly; Secure; SameSite=None; Path=/api` cookie named `dua_refresh`, so page scripts cannot read it. `POST /api/account/refresh` for a listed origin reads that cookie and ignores any `refreshToken` in the body. Only a client that sends **no `Origin` at all** (the Android app) receives `session.refreshToken` in JSON; sending `X-Dua-Native: 1` from a browser does not switch it into native mode.
+
+Cookie-only routes stay same-origin: `POST /api/web/chat` and `POST /api/web/agent/action`. A separate UI should not use those two. Call the engine for Dua Agent chat.
 
 Errors are JSON `{ "error": "..." }` with `Cache-Control: no-store`, unless a row below shows another body. `401` means sign in again. `403` means the origin or the owner email was refused. `503` with `{ "maintenance": true }` or `{ "paused": "agent"|"imagine"|"voice" }` means a kill switch.
 
@@ -47,11 +49,13 @@ User object:
 { "id": "uuid", "email": "", "displayName": "", "avatarUrl": "", "phoneNumber": "" }
 ```
 
-Native or listed-origin session:
+Native session (no `Origin`):
 
 ```json
 { "configured": true, "user": {}, "session": { "accessToken": "", "refreshToken": "", "expiresAt": 0 } }
 ```
+
+Listed browser origin: same shape **without** `refreshToken` (it arrives in the `dua_refresh` cookie).
 
 ## Node API
 
@@ -66,7 +70,7 @@ Local default: `http://127.0.0.1:3000`. JSON body unless a row says otherwise.
 | `POST /api/account/google-token` | `{ "idToken": "", "nonce": "" }` nonce optional | session JSON above. Android, or a browser origin listed in `WEB_ORIGINS` |
 | `POST /api/account/email-login` | `{ "email": "", "password": "" }` | session JSON |
 | `POST /api/account/email-signup` | `{ "email": "", "password": "" }` | session JSON, or `{ "configured": true, "confirmationRequired": true, "message": "..." }` |
-| `POST /api/account/refresh` | `{ "refreshToken": "" }` for native and listed origins | session JSON |
+| `POST /api/account/refresh` | `{ "refreshToken": "" }` for native; a listed origin uses its `dua_refresh` cookie | session JSON |
 | `POST /api/account/logout` | `{}` | `{ "user": null, "revoked": true, "message": "..." }` |
 | `PUT /api/account/phone` | `{ "phoneNumber": "+15551212", "expectedAccountId": "uuid" }` empty phone clears it | `{ "phoneUpdated": true, "ownerId": "uuid", "user": {} }` |
 | `PUT /api/account/password` | `{ "password": "", "expectedAccountId": "uuid" }` | `{ "passwordUpdated": true, "ownerId": "uuid", "message": "..." }` |
