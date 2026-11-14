@@ -48,7 +48,8 @@ test('/api/config advertises imagine for new apps without changing existing fiel
   assert.equal(data.imagine.image.enabled, true);
   assert.equal(data.files.enabled, true);
   assert.ok(Array.isArray(data.providers));
-  const setup = await (await handleService(new Request('https://dua.test/api/setup'), { env: imagineEnv })).json();
+  // F-03: full setup detail is owner-only; the owner session is verified against /auth/v1/user.
+  const setup = await (await handleService(new Request('https://dua.test/api/setup', { headers: { authorization: 'Bearer user-token' } }), { env: imagineEnv, fetcher: world() })).json();
   assert.deepEqual(setup.groups.map(g => g.id), ['providers', 'search', 'sync', 'memory', 'connectors', 'computer', 'voice', 'account']);
   assert.match(setup.groups[0].limitations.at(-1), /Imagine/);
 });
@@ -136,9 +137,8 @@ test('POST /api/imagine/image: xAI images are stored in the owner folder with th
   assert.deepEqual(fetcher.objects[data.images[0].path], PNG);
   const rpc = fetcher.rpcCalls[0];
   assert.deepEqual(rpc.json, { feature: 'image', amount: 2, daily_limit: 20 });
-  // F-01: the quota RPC runs with the service-role key, never the caller's own token.
-  assert.equal(rpc.headers.get('authorization'), 'Bearer ' + imagineEnv.SUPABASE_SERVICE_ROLE_KEY);
-  assert.equal(rpc.headers.get('apikey'), imagineEnv.SUPABASE_SERVICE_ROLE_KEY);
+  assert.equal(rpc.headers.get('authorization'), 'Bearer user-token');
+  assert.equal(rpc.headers.get('apikey'), 'sb_publishable_test');
   const upload = fetcher.calls.find(c => c.url.startsWith(SUPA + '/storage/v1/object/dua-files/'));
   assert.equal(upload.headers.get('authorization'), 'Bearer user-token');
   assert.equal(upload.headers.get('x-upsert'), 'false');
