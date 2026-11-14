@@ -3,7 +3,8 @@ import { env } from './helpers.mjs';
 export const SUPA = 'https://proj.supabase.co';
 export const UID = '11111111-2222-4333-8444-555555555555';
 export const OTHER = '99999999-2222-4333-8444-555555555555';
-export const filesEnv = { ...env, SUPABASE_URL: SUPA, SUPABASE_ANON_KEY: 'sb_publishable_test', DUA_ALLOWED_EMAIL: 'owner@example.com' };
+// F-01: the quota RPCs are service_role-only, so the fake env carries a service key too.
+export const filesEnv = { ...env, SUPABASE_URL: SUPA, SUPABASE_ANON_KEY: 'sb_publishable_test', SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_test', DUA_ALLOWED_EMAIL: 'owner@example.com' };
 export const path = (name = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', ext = 'pdf', uid = UID) => `${uid}/${name}.${ext}`;
 
 /** routes: [[predicate(url, init) | string prefix, handler(url, init, call)]]. Records {url, method, headers, body, json}. */
