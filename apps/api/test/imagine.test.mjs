@@ -137,8 +137,11 @@ test('POST /api/imagine/image: xAI images are stored in the owner folder with th
   assert.deepEqual(fetcher.objects[data.images[0].path], PNG);
   const rpc = fetcher.rpcCalls[0];
   assert.deepEqual(rpc.json, { feature: 'image', amount: 2, daily_limit: 20 });
-  assert.equal(rpc.headers.get('authorization'), 'Bearer user-token');
-  assert.equal(rpc.headers.get('apikey'), 'sb_publishable_test');
+  // F-01: dua_consume_imagine is service_role-only, so the cap is charged with the
+  // server's service-role key. The owner is still verified upstream (resolveOwner),
+  // and the limit is chosen by the server — never by the client.
+  assert.equal(rpc.headers.get('authorization'), 'Bearer sb_secret_test');
+  assert.equal(rpc.headers.get('apikey'), 'sb_secret_test');
   const upload = fetcher.calls.find(c => c.url.startsWith(SUPA + '/storage/v1/object/dua-files/'));
   assert.equal(upload.headers.get('authorization'), 'Bearer user-token');
   assert.equal(upload.headers.get('x-upsert'), 'false');
