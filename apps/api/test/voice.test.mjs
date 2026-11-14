@@ -84,7 +84,7 @@ test('TTS request building matches the documented xAI and Gemini shapes', () => 
   assert.equal(JSON.parse(geminiTtsRequest({ key: 'g', text: 'a' }).init.body).input[0].content[0].annotations, undefined);
   // Urdu is not on xAI's list: the server sends "auto" so the model detects it from the text.
   const config = ttsConfiguration(voiceEnv);
-  const urdu = buildTtsRequest(validateAudioRequest({ text: 'آپ کیسے ہیں', provider: 'xai', language: 'ur' }, config), voiceEnv);
+  const urdu = buildTtsRequest(validateAudioRequest({ text: '\u0622\u067e \u06a9\u06cc\u0633\u06d2 \u06c1\u06cc\u06ba', provider: 'xai', language: 'ur' }, config), voiceEnv);
   assert.equal(JSON.parse(urdu.init.body).language, 'auto');
   assert.equal(ttsFailure('xai', 401).status, 503);
   assert.match(ttsFailure('gemini', 429).message, /rate or credit/);
@@ -142,6 +142,7 @@ test('/api/config advertises voice for new apps', async () => {
   assert.equal(data.voice.version, 1);
   assert.deepEqual(data.voice.tts.providers.map(p => p.id), ['xai', 'gemini']);
   assert.ok(data.imagine && data.files, 'existing fields unchanged');
-  const setup = await (await handleService(new Request('https://dua.test/api/setup'), { env: withGemini })).json();
+  // F-03: full setup detail is owner-only; the owner session is verified against /auth/v1/user.
+  const setup = await (await handleService(new Request('https://dua.test/api/setup', { headers: { authorization: 'Bearer user-token' } }), { env: withGemini, fetcher: voiceWorld() })).json();
   assert.match(setup.groups.find(g => g.id === 'voice').limitations[0], /Grok \(28 voices\), Gemini \(30 voices\)/);
 });

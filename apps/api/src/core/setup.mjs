@@ -1,11 +1,13 @@
+import { timingSafeEqual } from 'node:crypto';
 import { providerConfiguration } from './providers.mjs';
-import { accountCapabilities } from './account.mjs';
+import { accountCapabilities, ownerEmail } from './account.mjs';
 import { searchConfiguration } from './search.mjs';
 import { advancedConfiguration } from './advanced-integrations.mjs';
 import { filesConfiguration } from './files.mjs';
 import { publicImagineConfiguration } from './imagine.mjs';
 import { voiceConfiguration } from './voice.mjs';
 import { codeExecutionConfiguration } from './code-execution.mjs';
+import { userToken } from './storage.mjs';
 import { PROVIDER_DEFINITIONS } from './providers.mjs';
 
 export function setupConfiguration(env = {}) {
@@ -20,7 +22,7 @@ export function setupConfiguration(env = {}) {
  const code = codeExecutionConfiguration(env, PROVIDER_DEFINITIONS, new Set(providers.filter(p=>p.configured).map(p=>p.name)));
  const codeLine = code.enabled ? 'Run code: '+code.providers.join(', ')+' can run Python in the provider\'s own sandbox when you turn on Run code (Gemini: no extra charge, 30 s per run). Code and output are shown in the reply and kept in the server snapshot and phone cache.' : 'Run code is off: '+code.reason;
  const ttsLine = voice.tts.enabled ? 'AI reply voices (signed-in owner only): '+voice.tts.providers.map(p=>p.name+' ('+p.voices.length+(p.voices.length===1?' voice':' voices')+')').join(', ')+'. Long replies play in short chunks and are cached on the device for this session.' : 'AI reply voices are off: '+voice.tts.reason;
- const imagineLine = !imagine.image.enabled&&!imagine.video.enabled&&imagine.image.reason===imagine.video.reason ? 'Imagine is off: '+imagine.image.reason : 'Imagine (signed-in owner only): '+(imagine.image.enabled?'images with '+imagine.image.providers.map(p=>p.name).join(' or ')+' (up to '+imagine.image.dailyLimit+' a day)':'images off. '+imagine.image.reason)+' · '+(imagine.video.enabled?'video with Grok Imagine (up to '+imagine.video.dailyLimit+' seconds a day, '+imagine.video.resolutions.join('/')+')':'video off. '+imagine.video.reason)+' Results are saved to the private dua-files bucket.';
+ const imagineLine = !imagine.image.enabled&&!imagine.video.enabled&&imagine.image.reason===imagine.video.reason ? 'Imagine is off: '+imagine.image.reason : 'Imagine (signed-in owner only): '+(imagine.image.enabled?'images with '+imagine.image.providers.map(p=>p.name).join(' or ')+' (up to '+imagine.image.dailyLimit+' a day)':'images off. '+imagine.image.reason)+' \u00b7 '+(imagine.video.enabled?'video with Grok Imagine (up to '+imagine.video.dailyLimit+' seconds a day, '+imagine.video.resolutions.join('/')+')':'video off. '+imagine.video.reason)+' Results are saved to the private dua-files bucket.';
  const liveLine = voice.live.enabled ? ' Live voice: Grok '+voice.live.model+', up to '+voice.live.dailyMinutes+' min a day and '+voice.live.maxSessionMinutes+' min per session (about '+voice.live.pricePerMinute+'/min); needs the Phase 4 migration.' : ' Live voice is off: '+voice.live.reason+' Hands-free mode uses device speech instead.';
  return {providers,account,search,advanced,files,imagine,voice,groups:[
   group('providers','AI providers',providers.slice(2).every(p=>p.configured)?'configured':providers.some(p=>p.configured)?'partial':'needs-configuration',['API key and model for each provider'],['All providers accept UTF-8 text and code files (TXT, CSV, MD, JSON, XML, YAML, logs, source code; 256 KB each). Image/PDF support depends on configured model capabilities; Grok accepts JPEG/PNG only (the app converts WebP to JPEG); Grok/Kimi do not accept inline PDF.','Stored files (signed-in owner only, up to '+Math.floor(files.maxBytes/1048576)+' MB): PDFs, spreadsheets (XLSX/XLS/ODS/CSV, parsed to CSV), text, images and audio (transcribed first). Grok reads stored PDFs through xAI file inputs; Kimi gets extracted PDF text.','Reasoning mode shows thinking for Dua/Gemini, Grok and ChatGPT reasoning models; Claude and Kimi answer normally.',codeLine,imagineLine]),
@@ -33,7 +35,74 @@ export function setupConfiguration(env = {}) {
   group('account','Account and access protection',account.configured?'partial':'needs-configuration',['Supabase Google provider','Optional deletion service key','Allowed personal account email and optional daily request limit'],['Sign-in is Google only: native Android Google Sign-In verified by the backend. There is no email/password sign-in. With an allowed email set, only that account can sign in, sync or delete. Request limits are not currency spending limits.'])
  ]};
 }
-export function handleSetup(req,{env={}}={}) {
- if(req.method!=='GET')return Response.json({error:'Method not allowed.'},{status:405,headers:{'Cache-Control':'no-store'}});
- return Response.json(setupConfiguration(env),{headers:{'Cache-Control':'no-store'}});
+
+function safeEqual(a, b) {
+ const left = Buffer.from(String(a));
+ const right = Buffer.from(String(b));
+ return left.length > 0 && left.length === right.length && timingSafeEqual(left, right);
+}
+
+/**
+ * F-03: /api/setup no longer enumerates the deployment to anonymous callers.
+ * Full detail (provider names, model IDs, daily limits, prices, "why disabled" reasons)
+ * is returned only to the owner: a matching DUA_APP_TOKEN (X-Dua-App-Token), or the owner's
+ * Supabase session verified against /auth/v1/user. Everyone else gets a coarse summary.
+ * No network call is made when no owner/token is configured, so smoke tests stay offline.
+ */
+async function setupAuthorized(request, env = {}, fetcher = fetch) {
+ const appToken = String(env.DUA_APP_TOKEN || '');
+ if (appToken && safeEqual(request.headers.get('x-dua-app-token') || '', appToken)) return true;
+ const owner = ownerEmail(env.DUA_ALLOWED_EMAIL);
+ const token = userToken(request);
+ const url = String(env.SUPABASE_URL || '').trim().replace(/\/$/, '');
+ const key = String(env.SUPABASE_ANON_KEY || '').trim();
+ if (!owner || !token || !url || !key) return false;
+ try {
+  const response = await fetcher(url + '/auth/v1/user', {
+   headers: { apikey: key, Authorization: 'Bearer ' + token },
+   signal: AbortSignal.timeout(10000), redirect: 'error'
+  });
+  if (!response.ok) return false;
+  const user = await response.json();
+  return Boolean(user && String(user.email || '').toLowerCase() === owner);
+ } catch { return false; }
+}
+
+/**
+ * Coarse /api/setup for callers who are not the owner: on/off booleans and counts only.
+ * No provider names or model IDs, no daily limits or prices, no "why disabled" reason strings.
+ * The boolean capability flags mirror what /api/config already exposes publicly.
+ */
+export function setupPublicSummary(env = {}) {
+ const providers = providerConfiguration(env);
+ const account = accountCapabilities({ url: env.SUPABASE_URL, key: env.SUPABASE_ANON_KEY, serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY });
+ const advanced = advancedConfiguration(env);
+ const imagine = publicImagineConfiguration(env);
+ const voice = voiceConfiguration(env);
+ return {
+  configured: {
+   providers: providers.filter(provider => provider.configured).length,
+   search: searchConfiguration(env).configured,
+   sync: account.configured,
+   memory: true,
+   connectors: advanced.connectors.github.configured && Boolean(env.DUA_ALLOWED_EMAIL),
+   computer: true,
+   imagine: imagine.image.enabled || imagine.video.enabled,
+   voice: voice.tts.enabled || voice.live.enabled,
+  },
+  account: {
+   configured: account.configured,
+   deletionConfigured: account.deletionConfigured,
+   requireLogin: ['1','true'].includes(String(env.DUA_REQUIRE_LOGIN).toLowerCase()) || Boolean(env.DUA_ALLOWED_EMAIL?.trim()) || Number(env.DUA_DAILY_REQUEST_LIMIT) > 0,
+   ownerRestricted: Boolean(env.DUA_ALLOWED_EMAIL?.trim()),
+   dailyRequestLimit: Number(env.DUA_DAILY_REQUEST_LIMIT) || 0,
+  },
+ };
+}
+
+export async function handleSetup(req, { env = {}, fetcher = fetch } = {}) {
+ if (req.method !== 'GET') return Response.json({ error: 'Method not allowed.' }, { status: 405, headers: { 'Cache-Control': 'no-store' } });
+ const headers = { 'Cache-Control': 'no-store' };
+ const authorized = await setupAuthorized(req, env, fetcher).catch(() => false);
+ return Response.json(authorized ? setupConfiguration(env) : setupPublicSummary(env), { headers });
 }
