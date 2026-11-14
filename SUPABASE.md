@@ -35,14 +35,16 @@ use `infra/database/migrations/` when locating the named SQL file.
 
 Use Node 24+ from `apps/api/` with `SUPABASE_URL` and `SUPABASE_ANON_KEY` (or `SUPABASE_PUBLISHABLE_KEY`) exported, then run `npm run verify:rls`. For an ignored local `.env` instead, run `node --env-file-if-exists=.env scripts/verify-rls.mjs`. Do not use a user access token, secret key or service-role key. The URL must be the project root, not `/rest/v1/`. Missing credentials print a helpful SKIP and exit 0; configuration, network and unverified access results exit 1. The script never prints keys or returned row contents.
 
-The requested default table names are `chats`, `messages`, `projects`, and `memories`. **This repo stores those collections together in `public.dua_cloud_snapshots`, not four separate tables.** For the deployed schema from the migration above, run:
+The default table list is every table created by `infra/database/migrations/` (14 tables: `dua_cloud_snapshots`, `dua_daily_usage`, `dua_imagine_usage`, `dua_voice_usage`, `dua_voice_sessions`, `agent_notes`, `dua_workflow_runs`, `dua_workflow_executions`, `dua_workflow_credentials`, `dua_workflow_automation`, `dua_workflow_deliveries`, `dua_orhan_tasks`, `dua_artifacts`, `dua_memories`). Running `npm run verify:rls` with no arguments checks all of them:
 
 ```sh
 cd apps/api
-npm run verify:rls -- --tables=dua_cloud_snapshots
+npm run verify:rls
 ```
 
-Optional `--tables=name,name` checks other exposed public tables. A missing table/REST schema-cache error is UNVERIFIED, never a pass. This script does not create tables or change grants/policies.
+`test/verify-rls.test.mjs` parses the migrations and fails if this list drifts, so a new migration that adds a table must also add it to `DEFAULT_TABLES` in `scripts/verify-rls.mjs`.
+
+Optional `--tables=name,name` checks a subset or other exposed public tables. A missing table/REST schema-cache error is UNVERIFIED, never a pass. This script does not create tables or change grants/policies.
 
 The checker first validates the public key through `/auth/v1/settings`, so a bad credential's 401 cannot make all tables look secure. Each anonymous GET uses `select=*&limit=1`: only an empty array or 401/403 passes. Each POST sends **an empty array, never a row**, with `Prefer: return=minimal,tx=rollback`. Only 401/403 proves INSERT admission is denied. A successful empty batch is inconclusive (and exits 1), because it cannot evaluate a row-level `WITH CHECK` expression. Constraint/validation errors also do not prove protection. No rows can be inserted even if rollback preferences are ignored or RLS is broken. Restrictive row policies that allow empty batches require separate SQL/advisor verification; this conservative script does not claim to audit policy definitions. An empty table returning `[]` also does not, by itself, prove RLS is enabled.
 
