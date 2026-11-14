@@ -4,7 +4,8 @@ Same request/response shape as the Node API's POST /api/imagine/image, so the ap
   request  {"prompt": "...", "n": 1, "aspectRatio": "1:1"}
   response {"images": [{"path", "mimeType", "size", "url", "expiresIn"}], "provider": "gemini", "model", "edit": false,
             "usage": {"images": {"used", "limit"}, "resetAt"}}
-Storage and the daily cap use the owner's own Supabase session (row-level security; no service-role key).
+Storage uses the owner's own Supabase session (row-level security). The daily cap RPC is
+service_role-only after the F-01 migration, so it is charged with the server's service-role key.
 """
 import json
 import os
@@ -77,13 +78,21 @@ def _call(request, limit=65536):
         return json.loads(response.read(limit) or b"null")
 
 
-def consume(token, amount=1):
-    """Daily cap through the same Supabase RPC as the Node API (dua_consume_imagine)."""
-    url, key, _ = _supabase()
+def consume(amount=1):
+    """Daily cap through the same Supabase RPC as the Node API (dua_consume_imagine).
+
+    Runs with the server's service-role key: the engine has already verified the owner
+    (owner_auth), and after the F-01 migration only service_role may execute
+    dua_consume_imagine, so a signed-in caller can no longer raise its own limit.
+    """
+    url, _, _ = _supabase()
+    service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not service_key:
+        raise ImagineError("Imagine usage caps need SUPABASE_SERVICE_ROLE_KEY on the engine after the F-01 migration.", 503)
     limit = daily_limit()
     request = Request(url + "/rest/v1/rpc/dua_consume_imagine", method="POST",
                       data=json.dumps({"feature": "image", "amount": amount, "daily_limit": limit}).encode(),
-                      headers={"apikey": key, "Authorization": "Bearer " + token, "Content-Type": "application/json"})
+                      headers={"apikey": service_key, "Authorization": "Bearer " + service_key, "Content-Type": "application/json"})
     try:
         data = _call(request)
     except HTTPError as error:
@@ -146,7 +155,7 @@ def first_image(response):
 
 def handle(body, token, user_id, client):
     prompt, aspect = validate(body)
-    usage = consume(token)
+    usage = consume()
     data, mime = generate(client, prompt, aspect)
     image = store(token, user_id, data, mime)
     return {"images": [image], "provider": "gemini", "model": MODEL, "edit": False, "usage": usage}

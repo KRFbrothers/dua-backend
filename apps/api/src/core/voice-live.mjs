@@ -145,12 +145,14 @@ export async function mintClientSecret(key, seconds, { fetcher = fetch, signal }
   return { value: data.value, expiresAt: data.expires_at };
 }
 
-async function rpc(config, token, name, body, { fetcher = fetch, signal } = {}) {
+async function rpc(config, token, name, body, { fetcher = fetch, signal, service = false } = {}) {
+  const serviceKey = service ? String(config.serviceRoleKey || '').trim() : '';
+  if (service && !serviceKey) throw new VoiceError('Live voice usage storage needs SUPABASE_SERVICE_ROLE_KEY on the server after the F-01 migration.', 503, { code: 'setup' });
   let response;
   try {
     response = await fetcher(`${config.url}/rest/v1/rpc/${name}`, {
       method: 'POST', redirect: 'error', signal: AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(15000)]),
-      headers: { apikey: config.key, Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      headers: { apikey: service ? serviceKey : config.key, Authorization: 'Bearer ' + (service ? serviceKey : token), 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     });
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -174,8 +176,10 @@ export const MIN_SESSION_SECONDS = 30;
 export async function startLiveSession(valid, { env, fetcher, signal, config, token, sessionId = crypto.randomUUID() }) {
   const settings = liveSettings(env);
   const limitSeconds = settings.dailyMinutes * 60;
+  // F-01: dua_start_voice_session is service_role-only now; the owner was already
+  // verified by resolveOwner, and only the server may choose the daily limit.
   const data = await rpc(config, token, 'dua_start_voice_session',
-    { session_id: sessionId, reserve_seconds: settings.sessionMinutes * 60, daily_limit_seconds: limitSeconds, min_seconds: MIN_SESSION_SECONDS }, { fetcher, signal });
+    { session_id: sessionId, reserve_seconds: settings.sessionMinutes * 60, daily_limit_seconds: limitSeconds, min_seconds: MIN_SESSION_SECONDS }, { fetcher, signal, service: true });
   if (typeof data?.allowed !== 'boolean') fail('Live voice usage storage returned an invalid response. Retry.', 503);
   const usage = usageOf(data, limitSeconds);
   if (!data.allowed) {

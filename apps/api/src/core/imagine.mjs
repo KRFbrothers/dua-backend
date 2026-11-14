@@ -254,7 +254,7 @@ export async function handleImagine(request, { env = process.env, fetcher = fetc
   if (!ROUTES[action]) return json({ error: 'Not found.' }, 404);
   if (request.method !== ROUTES[action]) return json({ error: 'Method not allowed.' }, 405);
   const config = imagineConfiguration(env);
-  const storage = storageConfig(env);
+  const storage = { ...storageConfig(env), serviceRoleKey: String(env.SUPABASE_SERVICE_ROLE_KEY || '').trim() };
   // A video already started keeps polling even if video generation is switched off afterwards.
   const statusPossible = storage.enabled && hasKey(env.GROK_API_KEY) && Boolean(String(env.DUA_ALLOWED_EMAIL || '').trim());
   if (action === 'image' && !config.image.enabled) return json({ error: config.image.reason }, 503);

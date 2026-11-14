@@ -97,7 +97,7 @@ async function audioAction(request, ctx) {
   return new Response(audio.bytes, { headers: { ...noStore, 'Content-Type': audio.mimeType, 'Content-Length': String(audio.bytes.length), 'X-Dua-Voice-Provider': valid.provider } });
 }
 
-const liveConfig = env => storageConfig({ ...env, DUA_FILES: '1', DUA_FILES_BUCKET: 'dua-files' });
+const liveConfig = env => ({ ...storageConfig({ ...env, DUA_FILES: '1', DUA_FILES_BUCKET: 'dua-files' }), serviceRoleKey: String(env.SUPABASE_SERVICE_ROLE_KEY || '').trim() });
 function liveEnabled(env) {
   const live = liveConfiguration(env, voiceBaseReason(env));
   if (!live.enabled) throw new VoiceError(live.reason, 503, { code: 'live_off' });

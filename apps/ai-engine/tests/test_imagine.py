@@ -47,6 +47,7 @@ def setup(monkeypatch):
     monkeypatch.setattr(engine, "verify_owner", lambda authorization: OWNER)
     monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co")
     monkeypatch.setenv("SUPABASE_ANON_KEY", "anon")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-key")
     monkeypatch.delenv("DUA_APP_TOKEN", raising=False)
     monkeypatch.delenv("DUA_IMAGINE", raising=False)
     opener = Opener()
@@ -76,8 +77,10 @@ def test_one_image_stored_in_owner_folder_in_app_format(setup):
     assert image["url"].startswith("https://proj.supabase.co/storage/v1/object/sign/") and "token=" in image["url"]
     assert body["provider"] == "gemini" and body["model"] == imagine.MODEL and body["edit"] is False
     assert body["usage"]["images"] == {"used": 3, "limit": 20}
-    # Every Supabase call uses the owner's own session, never a service key.
-    assert all(auth == "Bearer user.jwt" for _, _, auth, _ in setup.opener.calls)
+    # F-01: the quota RPC uses the service-role key; storage still uses the owner's session.
+    rpc_auth = setup.opener.calls[0][2]
+    assert rpc_auth == "Bearer service-key"
+    assert all(auth == "Bearer user.jwt" for _, _, auth, _ in setup.opener.calls[1:])
     rpc = json.loads(setup.opener.calls[0][3])
     assert rpc == {"feature": "image", "amount": 1, "daily_limit": 20}
 
