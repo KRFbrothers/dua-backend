@@ -1,0 +1,87 @@
+name: Project checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  google-cloud:
+    name: Google Cloud engine tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      adk-postgres:
+        image: pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+        env:
+          POSTGRES_PASSWORD: adk-ci-disposable-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install isolated test dependencies
+        run: |
+          python3 -m venv /tmp/dua-gcb-tests
+          /tmp/dua-gcb-tests/bin/python -m pip install Flask==3.0.3 pytest==8.3.5
+      - name: Run mocked Vertex engine tests
+        run: /tmp/dua-gcb-tests/bin/python -m pytest -q apps/ai-engine/tests --junitxml=apps/ai-engine/pytest-results.xml
+      - name: Install production SDK test dependencies
+        run: |
+          python3 -m venv /tmp/dua-gcb-adk-tests
+          /tmp/dua-gcb-adk-tests/bin/python -m pip install -r apps/ai-engine/requirements-adapters-lock.txt pytest==8.3.5
+      - name: Run engine tests with the real ADK SDK and offline models
+        env:
+          ADK_TEST_POSTGRES_URL: postgresql://postgres:adk-ci-disposable-only@127.0.0.1:5432/postgres
+        run: |
+          /tmp/dua-gcb-adk-tests/bin/python -c "import google.adk, google.genai, asyncpg, psycopg, pgvector, litellm"
+          /tmp/dua-gcb-adk-tests/bin/python -m pytest -q apps/ai-engine/tests --junitxml=apps/ai-engine/pytest-sdk-results.xml
+      - name: Preserve engine test report
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: google-cloud-engine-test-report
+          path: |
+            apps/ai-engine/pytest-results.xml
+            apps/ai-engine/pytest-sdk-results.xml
+          if-no-files-found: ignore
+          retention-days: 3
+
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/api/package-lock.json
+      - name: Install locked backend dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run backend tests
+        run: npm run test:ci
+      - name: Preserve backend test report
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: backend-unit-test-report
+          path: apps/api/backend-test-results.xml
+          if-no-files-found: ignore
+          retention-days: 3
