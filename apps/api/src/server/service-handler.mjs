@@ -11,7 +11,6 @@ import { handleImagine } from '../core/imagine.mjs';
 import { handleVoice } from '../core/voice.mjs';
 import { handleWorkflowRuns } from '../core/workflow-runs.mjs';
 import { handleOrhanTasks } from '../core/orhan-tasks.mjs';
-import { handleArtifactsMemories } from '../core/artifacts-memories.mjs';
 import { handleWorkflowExecution } from '../core/workflow-execution.mjs';
 import { handleWorkflowAutomation } from '../core/workflow-automation.mjs';
 import { handleBuildPr } from '../core/build-pr.mjs';
@@ -19,7 +18,7 @@ import { withRequestLog } from '../core/request-logging.mjs';
 import { switchResponse, killSwitches, PAUSED } from '../core/kill-switches.mjs';
 import { applyCors, corsPreflight, requestOriginAllowed } from '../core/cors.mjs';
 
-/** DUA_CHAT_DEADLINE_SECONDS: whole-request chat deadline (default 280 s, allowed 10–790 s). */
+/** DUA_CHAT_DEADLINE_SECONDS: whole-request chat deadline (default 280 s, allowed 10\u2013790 s). */
 export const chatDeadlineMs = env => envInteger(env, 'DUA_CHAT_DEADLINE_SECONDS', 280, 10, 790) * 1000;
 
 export async function handleService(request, options = {}) {
@@ -47,11 +46,9 @@ async function routeService(request,{env=process.env,fetcher=fetch}={}) {
  if(path==='/api/web/agent/action')return handleWebAgentAction(request,{env,fetcher});
  if(path==='/api/workflow-runs')return handleWorkflowRuns(request,{env,fetcher});
  if(path.startsWith('/api/orhan/tasks'))return handleOrhanTasks(request,{env,fetcher});
- // Artifacts and Memory lists: owner-only (Supabase sign-in + DUA_ALLOWED_EMAIL), checked inside the handler.
- if(path==='/api/artifacts'||path.startsWith('/api/artifacts/')||path==='/api/memories'||path.startsWith('/api/memories/'))return handleArtifactsMemories(request,{env,fetcher});
  if(path==='/api/workflow-executions'||path.startsWith('/api/workflow-executions/'))return handleWorkflowExecution(request,{env,fetcher});
  if(path==='/api/workflow-automation'||path.startsWith('/api/workflow-automation/'))return handleWorkflowAutomation(request,{env,fetcher});
- if(path==='/api/setup')return handleSetup(request,{env});
+ if(path==='/api/setup')return handleSetup(request,{env,fetcher});
  if(path==='/api/config')return handleChat(request,{env,fetcher});
  // Account and cloud routes: owner-locked by DUA_ALLOWED_EMAIL inside handleAccount (session, features and logout stay open).
  if(path==='/api/cloud'||path==='/api/cloud/chat'||/^\/api\/account\/(session|refresh|logout|features|google-token|email-login|email-signup|password|phone|delete)$/.test(path)) {
