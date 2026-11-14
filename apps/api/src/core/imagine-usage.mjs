@@ -1,17 +1,19 @@
 // Durable per-feature daily caps for Imagine (Supabase RPCs from infra/database/migrations/202610090001_dua_imagine.sql).
-// The RPCs run as the signed-in owner (auth.uid()), so no service-role key is needed. A caller can only
-// add to its own usage: amounts are positive and the limit only decides whether the request is allowed.
+// F-01: dua_consume_imagine is service_role-only, so the cap is charged with the server's service-role key.
+// The caller is still verified as the owner upstream (resolveOwner); the limit is chosen by the server, never the client.
 import { readJsonLimited } from './limited-json.mjs';
 import { ImagineError } from './imagine-providers.mjs';
 
 const SETUP = 'Imagine usage caps need the Phase 3 Supabase migration (infra/database/migrations/202610090001_dua_imagine.sql). Run it in the Supabase SQL editor.';
 
-async function rpc(config, token, name, body, { fetcher = fetch, signal } = {}) {
+async function rpc(config, token, name, body, { fetcher = fetch, signal, service = false } = {}) {
+  const serviceKey = service ? String(config.serviceRoleKey || '').trim() : '';
+  if (service && !serviceKey) throw new ImagineError('Imagine usage caps need SUPABASE_SERVICE_ROLE_KEY on the server after the F-01 migration.', 503, { code: 'setup' });
   let response;
   try {
     response = await fetcher(`${config.url}/rest/v1/rpc/${name}`, {
       method: 'POST', redirect: 'error', signal: AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(15000)]),
-      headers: { apikey: config.key, Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      headers: { apikey: service ? serviceKey : config.key, Authorization: 'Bearer ' + (service ? serviceKey : token), 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     });
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -30,7 +32,9 @@ async function rpc(config, token, name, body, { fetcher = fetch, signal } = {}) 
  * Returns {used, limit, resetAt}; throws 429 ImagineError when the cap would be exceeded.
  */
 export async function consumeImagine(config, token, feature, amount, limit, options = {}) {
-  const data = await rpc(config, token, 'dua_consume_imagine', { feature, amount, daily_limit: limit }, options);
+  // F-01: dua_consume_imagine is service_role-only now; the caller's token is still
+  // used for the owner check upstream (resolveOwner), never to raise the limit.
+  const data = await rpc(config, token, 'dua_consume_imagine', { feature, amount, daily_limit: limit }, { ...options, service: true });
   if (typeof data?.allowed !== 'boolean' || !Number.isSafeInteger(data.used) || data.used < 0 || !Number.isSafeInteger(data.resetAt)) throw new ImagineError('Imagine usage storage returned an invalid response. Retry.', 503);
   const usage = { used: data.used, limit, resetAt: data.resetAt };
   if (!data.allowed) {
