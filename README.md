@@ -39,3 +39,5 @@ node --test test/web-chat.test.mjs test/orhan-tasks.test.mjs
 cd apps/ai-engine
 py -3 -m pytest -q tests/test_dua_agent_skills.py tests/test_app.py tests/test_orhan.py
 ```
+
+<!-- pr.sh probe 2026-11-15T07:19:23Z -->
