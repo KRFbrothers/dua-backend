@@ -1,6 +1,7 @@
 // Durable per-feature daily caps for Imagine (Supabase RPCs from infra/database/migrations/202610090001_dua_imagine.sql).
 // F-01: dua_consume_imagine is service_role-only, so the cap is charged with the server's service-role key.
-// The caller is still verified as the owner upstream (resolveOwner); the limit is chosen by the server, never the client.
+// The caller is still verified as the owner upstream (resolveOwner) and that user's id is sent as `owner`
+// (202611160001_owner_scoped_quota_rpcs.sql); the limit is chosen by the server, never the client.
 import { readJsonLimited } from './limited-json.mjs';
 import { ImagineError } from './imagine-providers.mjs';
 
@@ -28,13 +29,15 @@ async function rpc(config, token, name, body, { fetcher = fetch, signal, service
 }
 
 /**
- * Atomically adds `amount` (images or video seconds) to today's UTC usage when it fits `limit`.
+ * Atomically adds `amount` (images or video seconds) to `ownerId`'s today's UTC usage when it fits `limit`.
+ * `ownerId` is the verified owner's Supabase user id from resolveOwner.
  * Returns {used, limit, resetAt}; throws 429 ImagineError when the cap would be exceeded.
  */
-export async function consumeImagine(config, token, feature, amount, limit, options = {}) {
-  // F-01: dua_consume_imagine is service_role-only now; the caller's token is still
-  // used for the owner check upstream (resolveOwner), never to raise the limit.
-  const data = await rpc(config, token, 'dua_consume_imagine', { feature, amount, daily_limit: limit }, { ...options, service: true });
+export async function consumeImagine(config, token, ownerId, feature, amount, limit, options = {}) {
+  // F-01: dua_consume_imagine is service_role-only now, so auth.uid() is empty; the account is
+  // passed explicitly as `owner` (verified upstream by resolveOwner), never chosen by the client.
+  if (typeof ownerId !== 'string' || !ownerId) throw new ImagineError('Imagine usage storage is unavailable. Retry.', 503);
+  const data = await rpc(config, token, 'dua_consume_imagine', { owner: ownerId, feature, amount, daily_limit: limit }, { ...options, service: true });
   if (typeof data?.allowed !== 'boolean' || !Number.isSafeInteger(data.used) || data.used < 0 || !Number.isSafeInteger(data.resetAt)) throw new ImagineError('Imagine usage storage returned an invalid response. Retry.', 503);
   const usage = { used: data.used, limit, resetAt: data.resetAt };
   if (!data.allowed) {

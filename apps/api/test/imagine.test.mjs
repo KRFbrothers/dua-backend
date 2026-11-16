@@ -136,7 +136,7 @@ test('POST /api/imagine/image: xAI images are stored in the owner folder with th
   assert.deepEqual(data.usage, { images: { used: 2, limit: 20 }, resetAt: 1791590400 });
   assert.deepEqual(fetcher.objects[data.images[0].path], PNG);
   const rpc = fetcher.rpcCalls[0];
-  assert.deepEqual(rpc.json, { feature: 'image', amount: 2, daily_limit: 20 });
+  assert.deepEqual(rpc.json, { owner: UID, feature: 'image', amount: 2, daily_limit: 20 });
   // F-01: dua_consume_imagine is service_role-only, so the cap is charged with the
   // server's service-role key. The owner is still verified upstream (resolveOwner),
   // and the limit is chosen by the server — never by the client.
@@ -255,7 +255,7 @@ test('video: submit charges seconds and returns a signed job; status polls until
   assert.deepEqual({ ...submit.json, image: undefined }, { model: 'grok-imagine-video-1.5', prompt: 'Waves crash', duration: 8, resolution: '480p', image: undefined });
   assert.match(submit.json.image.url, /^data:image\/png;base64,/);
   assert.equal(submit.json.aspect_ratio, undefined);
-  assert.deepEqual(fetcher.rpcCalls[0].json, { feature: 'video', amount: 8, daily_limit: 60 });
+  assert.deepEqual(fetcher.rpcCalls[0].json, { owner: UID, feature: 'video', amount: 8, daily_limit: 60 });
 
   const pending = await (await handleImagine(imagineRequest('status', { jobId: job.jobId }), { env: imagineEnv, fetcher })).json();
   assert.deepEqual(pending, { status: 'pending', progress: 30, pollAfterSeconds: 5 });

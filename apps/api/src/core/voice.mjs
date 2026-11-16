@@ -108,7 +108,7 @@ async function sessionAction(request, ctx) {
   try { body = await readJsonLimited(request, 65536); }
   catch (error) { return json({ error: error.status === 413 ? 'Chat context is too long for live voice.' : 'Invalid request.' }, error.status === 413 ? 413 : 400); }
   const valid = validateSessionRequest(body);
-  const session = await startLiveSession(valid, { env: ctx.env, fetcher: ctx.fetcher, signal: request.signal, config: liveConfig(ctx.env), token: ctx.token });
+  const session = await startLiveSession(valid, { env: ctx.env, fetcher: ctx.fetcher, signal: request.signal, config: liveConfig(ctx.env), token: ctx.token, ownerId: ctx.user.id });
   return json(session);
 }
 async function sessionEndAction(request, ctx) {

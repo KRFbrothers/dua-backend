@@ -78,20 +78,24 @@ def _call(request, limit=65536):
         return json.loads(response.read(limit) or b"null")
 
 
-def consume(amount=1):
+def consume(user_id, amount=1):
     """Daily cap through the same Supabase RPC as the Node API (dua_consume_imagine).
 
     Runs with the server's service-role key: the engine has already verified the owner
     (owner_auth), and after the F-01 migration only service_role may execute
     dua_consume_imagine, so a signed-in caller can no longer raise its own limit.
+    auth.uid() is empty for a service-role call, so the verified owner's id is sent as
+    `owner` (202611160001_owner_scoped_quota_rpcs.sql).
     """
+    if not isinstance(user_id, str) or not user_id:
+        raise ImagineError("Imagine usage storage is unavailable. Retry.", 503)
     url, _, _ = _supabase()
     service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     if not service_key:
         raise ImagineError("Imagine usage caps need SUPABASE_SERVICE_ROLE_KEY on the engine after the F-01 migration.", 503)
     limit = daily_limit()
     request = Request(url + "/rest/v1/rpc/dua_consume_imagine", method="POST",
-                      data=json.dumps({"feature": "image", "amount": amount, "daily_limit": limit}).encode(),
+                      data=json.dumps({"owner": user_id, "feature": "image", "amount": amount, "daily_limit": limit}).encode(),
                       headers={"apikey": service_key, "Authorization": "Bearer " + service_key, "Content-Type": "application/json"})
     try:
         data = _call(request)
@@ -155,7 +159,7 @@ def first_image(response):
 
 def handle(body, token, user_id, client):
     prompt, aspect = validate(body)
-    usage = consume()
+    usage = consume(user_id)
     data, mime = generate(client, prompt, aspect)
     image = store(token, user_id, data, mime)
     return {"images": [image], "provider": "gemini", "model": MODEL, "edit": False, "usage": usage}

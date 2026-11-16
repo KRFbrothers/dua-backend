@@ -82,7 +82,7 @@ def test_one_image_stored_in_owner_folder_in_app_format(setup):
     assert rpc_auth == "Bearer service-key"
     assert all(auth == "Bearer user.jwt" for _, _, auth, _ in setup.opener.calls[1:])
     rpc = json.loads(setup.opener.calls[0][3])
-    assert rpc == {"feature": "image", "amount": 1, "daily_limit": 20}
+    assert rpc == {"owner": OWNER, "feature": "image", "amount": 1, "daily_limit": 20}
 
 
 def test_daily_cap_blocks_before_generating(setup):

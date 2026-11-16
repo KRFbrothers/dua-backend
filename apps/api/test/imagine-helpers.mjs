@@ -22,6 +22,8 @@ export function world({ usage = { image: 0, video: 0 }, objects = {}, xai, gemin
     [SUPA + '/rest/v1/rpc/dua_consume_imagine', (url, init, call) => {
       rpcCalls.push(call);
       if (rpcMissing) return Response.json({ code: 'PGRST202', message: 'Could not find the function' }, { status: 404 });
+      // 202611160001: the service-role call names the verified owner explicitly (auth.uid() is empty).
+      if (call.json.owner !== UID) return Response.json({ code: '42501', message: 'Sign in required' }, { status: 400 });
       const { feature, amount, daily_limit } = call.json;
       const used = state[feature];
       if (used + amount > daily_limit) return Response.json({ allowed: false, used, resetAt: 1791590400 });
