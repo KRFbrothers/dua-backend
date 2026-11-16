@@ -395,6 +395,7 @@ def test_secret_filter_does_not_buffer_normal_words_until_the_answer_finishes():
     assert r.feed(final=True)==''
 
 
+@pytest.mark.skipif(sys.platform == 'win32', reason='Bash deployment script requires a POSIX environment')
 def test_rollback_restores_recorded_traffic_and_rejects_other_targets(tmp_path,monkeypatch):
     import subprocess,os
     script=Path(__file__).resolve().parents[1]/'deploy-adk.sh'

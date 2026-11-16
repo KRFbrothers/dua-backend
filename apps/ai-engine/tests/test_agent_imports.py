@@ -94,9 +94,13 @@ def shipped_runtime(tmp_path_factory):
 
 
 def run_isolated(runtime, probe, *args):
+    env = {"PATH": os.defpath}
+    if sys.platform == "win32":
+        env["SystemRoot"] = os.environ.get("SystemRoot", r"C:\Windows")
+        env["PATH"] = os.environ.get("SystemRoot", r"C:\Windows") + r"\System32" + os.pathsep + os.defpath
     result = subprocess.run(
         [sys.executable, "-I", "-B", "-c", textwrap.dedent(probe), str(runtime), *args],
-        cwd=runtime, env={"PATH": os.defpath}, capture_output=True, text=True, timeout=30,
+        cwd=runtime, env=env, capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 

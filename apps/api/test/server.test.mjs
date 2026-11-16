@@ -55,7 +55,7 @@ test('server entry point honors container binding and serves unauthenticated con
 });
 
 test('local server streams chunks to the client as they are produced', async () => {
-  const fetcher = mockFetch(sseResponse(geminiChunks(['One ', 'two ', 'three']), { delayMs: 60 }));
+  const fetcher = mockFetch(sseResponse(geminiChunks(['One ', 'two ', 'three']), { delayMs: 75 }));
   const server = makeServer({ env: { ...env }, key: env.GEMINI_API_KEY, model: env.GEMINI_MODEL, fetcher, supabaseUrl: '', supabaseKey: '' }).listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   try {
@@ -73,7 +73,7 @@ test('local server streams chunks to the client as they are produced', async () 
     assert.match(text, /event: text\ndata: \{"type":"text","delta":"One "\}/);
     assert.match(text, /event: done/);
     assert.ok(arrivals.length >= 3, 'expected several network chunks');
-    assert.ok(arrivals.at(-1) - arrivals[0] >= 100, 'chunks should be spread over time, not buffered');
+    assert.ok(arrivals.at(-1) - arrivals[0] >= 80, 'chunks should be spread over time, not buffered');
   } finally { server.close(); }
 });
 

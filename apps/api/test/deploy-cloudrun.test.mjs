@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+const testPosix = (name, fn) => test(name, { skip: process.platform === 'win32' ? 'bash deploy script tests require a POSIX environment' : false }, fn);
+
 const required = ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'DUA_ALLOWED_EMAIL'];
 
 function deployment({ secrets = required, version = '7', listFailure = false, buildFailure = false, resourcesExist = false, omitTemplateFlags = [], appendTemplate = '', settings = {} } = {}) {
@@ -46,7 +48,7 @@ if (args[0] === 'run' && args[1] === 'services') console.log('https://dua-api.ex
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
-test('Cloud Run deployment keeps secrets out of builds and grants runtime access only to selected versions', () => {
+testPosix('Cloud Run deployment keeps secrets out of builds and grants runtime access only to selected versions', () => {
   const selected = [...required, 'SUPABASE_SERVICE_ROLE_KEY', 'GEMINI_API_KEY', 'GEMINI_MODEL', 'DUA_FILES_BUCKET', 'DUA_FILES', 'GITHUB_BUILD_WRITE_TOKEN'];
   const result = deployment({ secrets: [...selected, 'UNRELATED_SECRET', 'PORT', 'DUA_REQUIRE_LOGIN'] });
   assert.equal(result.status, 0, result.stderr);
@@ -92,7 +94,7 @@ test('Cloud Run deployment keeps secrets out of builds and grants runtime access
   assert.ok(result.calls.some(args => args[0] === 'artifacts' && args[2] === 'create' && args[3] === 'dua-api'));
 });
 
-test('deployment fails closed on missing secrets, missing versions or a failed inventory request', () => {
+testPosix('deployment fails closed on missing secrets, missing versions or a failed inventory request', () => {
   for (const options of [{ secrets: required.slice(0, 2) }, { version: '' }, { listFailure: true }]) {
     const result = deployment(options);
     assert.notEqual(result.status, 0);
@@ -100,7 +102,7 @@ test('deployment fails closed on missing secrets, missing versions or a failed i
   }
 });
 
-test('existing feature flag secrets must be attached from the template before any IAM, build or deployment', () => {
+testPosix('existing feature flag secrets must be attached from the template before any IAM, build or deployment', () => {
   const flags = ['DUA_FILES', 'ENABLE_GITHUB_CONNECTOR', 'DUA_BUILD_PR', 'ENABLE_GENERATED_VOICE'];
   for (const flag of flags) {
     const result = deployment({ secrets: [...required, flag], omitTemplateFlags: [flag] });
@@ -117,7 +119,7 @@ test('existing feature flag secrets must be attached from the template before an
   for (const flag of flags) assert.ok(env.includes(`${flag}=0`));
 });
 
-test('deployment validates project/deadline and supports a longer explicit deadline', () => {
+testPosix('deployment validates project/deadline and supports a longer explicit deadline', () => {
   for (const settings of [{ PROJECT_ID: '' }, { PROJECT_ID: 'Display Name' }, { DUA_CHAT_DEADLINE_SECONDS: '900' }, { DUA_CHAT_DEADLINE_SECONDS: 'bad' }]) {
     const result = deployment({ settings });
     assert.notEqual(result.status, 0);
@@ -133,14 +135,14 @@ test('deployment validates project/deadline and supports a longer explicit deadl
     'an existing repository still receives the scoped writer grant');
 });
 
-test('a failed container build cannot deploy a stale image', () => {
+testPosix('a failed container build cannot deploy a stale image', () => {
   const result = deployment({ buildFailure: true });
   assert.equal(result.status, 17);
   assert.ok(result.calls.some(args => args[0] === 'builds'));
   assert.ok(!result.calls.some(args => args[0] === 'run'));
 });
 
-test('deployment builds the website into apps/api/site before the container build, and fails closed if it breaks', () => {
+testPosix('deployment builds the website into apps/api/site before the container build, and fails closed if it breaks', () => {
   const site = mkdtempSync(join(tmpdir(), 'dua-website-'));
   try {
     // Fake npm: `npm run build -- --outDir X` writes X/index.html unless MOCK_SITE_FAIL=1.
@@ -172,7 +174,7 @@ const KILL_SWITCHES = ['DUA_DISABLE_AGENT', 'DUA_DISABLE_IMAGINE', 'DUA_DISABLE_
 const deployCall = result => result.calls.find(args => args[0] === 'run' && args[1] === 'deploy');
 const replacing = /^--(set|clear)-(env-vars|secrets)\b|^--clear-/;
 
-test('owner rule: the deploy script never replaces or clears env vars or secrets', () => {
+testPosix('owner rule: the deploy script never replaces or clears env vars or secrets', () => {
   const source = readFileSync(new URL('../deploy-cloudrun.sh', import.meta.url), 'utf8');
   const code = source.split('\n').filter(line => !line.trim().startsWith('#')).join('\n');
   assert.doesNotMatch(code, /--(set|clear)-(env-vars|secrets)|--clear-/);
@@ -186,7 +188,7 @@ test('owner rule: the deploy script never replaces or clears env vars or secrets
   }
 });
 
-test('kill switches are never passed by a deploy, so values set with gcloud run services update persist', () => {
+testPosix('kill switches are never passed by a deploy, so values set with gcloud run services update persist', () => {
   const result = deployment({ secrets: [...required, ...KILL_SWITCHES], appendTemplate: 'DUA_DISABLE_AGENT=0\n# DUA_MAINTENANCE=0\nDUA_MAINTENANCE_MESSAGE=\nDUA_DISABLE_FUTURE_THING=0' });
   assert.equal(result.status, 0, result.stderr);
   const deploy = deployCall(result);
@@ -194,7 +196,7 @@ test('kill switches are never passed by a deploy, so values set with gcloud run 
   assert.ok(!result.calls.some(args => args[0] === 'secrets' && args[1] === 'add-iam-policy-binding' && /DUA_DISABLE_|DUA_MAINTENANCE/.test(args[2])));
 });
 
-test('a feature flag moved to Secret Manager drops only its old literal', () => {
+testPosix('a feature flag moved to Secret Manager drops only its old literal', () => {
   const result = deployment({ secrets: [...required, 'DUA_FILES'] });
   assert.equal(result.status, 0, result.stderr);
   const deploy = deployCall(result);
@@ -204,7 +206,7 @@ test('a feature flag moved to Secret Manager drops only its old literal', () => 
   assert.deepEqual(deployCall(deployment()).filter(arg => arg.startsWith('--remove-')), []);
 });
 
-test('DUA_REMOVE_SECRETS removes exactly the named bindings and protects kill switches', () => {
+testPosix('DUA_REMOVE_SECRETS removes exactly the named bindings and protects kill switches', () => {
   const result = deployment({ settings: { DUA_REMOVE_SECRETS: 'OLD_TOKEN,LEGACY_KEY' } });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(deployCall(result).filter(arg => arg.startsWith('--remove-secrets')), ['--remove-secrets=OLD_TOKEN,LEGACY_KEY']);
