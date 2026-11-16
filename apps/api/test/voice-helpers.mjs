@@ -39,6 +39,8 @@ export function liveWorld({ usedSeconds = 0, rpcMissing = false, secret, email }
   const fetcher = voiceWorld({ email, routes: [
     [SUPA + '/rest/v1/rpc/dua_start_voice_session', (url, init, call) => {
       if (rpcMissing) return missing();
+      // 202611160001: the service-role call names the verified owner explicitly (auth.uid() is empty).
+      if (call.json.owner !== UID) return Response.json({ code: '42501', message: 'Sign in required' }, { status: 400 });
       const { session_id, reserve_seconds, daily_limit_seconds, min_seconds } = call.json;
       const active = [...state.sessions.values()].filter(s => !s.ended).reduce((sum, s) => sum + s.reserved, 0);
       const remaining = Math.max(0, daily_limit_seconds - state.usedSeconds - active);

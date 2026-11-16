@@ -173,13 +173,14 @@ const usageOf = (data, limitSeconds) => ({ usedSeconds: seconds(data?.usedSecond
 export const MIN_SESSION_SECONDS = 30;
 
 /** Reserves minutes, then mints the token. A failed mint ends the session at once, which frees the reservation. */
-export async function startLiveSession(valid, { env, fetcher, signal, config, token, sessionId = crypto.randomUUID() }) {
+export async function startLiveSession(valid, { env, fetcher, signal, config, token, ownerId, sessionId = crypto.randomUUID() }) {
   const settings = liveSettings(env);
   const limitSeconds = settings.dailyMinutes * 60;
-  // F-01: dua_start_voice_session is service_role-only now; the owner was already
-  // verified by resolveOwner, and only the server may choose the daily limit.
+  // F-01: dua_start_voice_session is service_role-only now, so auth.uid() is empty; the owner
+  // verified by resolveOwner is passed as `owner`, and only the server may choose the daily limit.
+  if (typeof ownerId !== 'string' || !ownerId) fail('Live voice usage storage is unavailable. Retry.', 503);
   const data = await rpc(config, token, 'dua_start_voice_session',
-    { session_id: sessionId, reserve_seconds: settings.sessionMinutes * 60, daily_limit_seconds: limitSeconds, min_seconds: MIN_SESSION_SECONDS }, { fetcher, signal, service: true });
+    { owner: ownerId, session_id: sessionId, reserve_seconds: settings.sessionMinutes * 60, daily_limit_seconds: limitSeconds, min_seconds: MIN_SESSION_SECONDS }, { fetcher, signal, service: true });
   if (typeof data?.allowed !== 'boolean') fail('Live voice usage storage returned an invalid response. Retry.', 503);
   const usage = usageOf(data, limitSeconds);
   if (!data.allowed) {

@@ -174,7 +174,7 @@ async function imageAction(body, ctx) {
   const request = validateImageRequest(body, ctx.config);
   // Sources load before the cap is charged, so a bad image never costs part of the daily budget.
   const sources = [...await Promise.all(request.sourcePaths.map(path => loadSource(path, ctx.user, ctx))), ...request.inline];
-  const usage = await consumeImagine(ctx.storage, ctx.token, 'image', request.n, ctx.config.image.dailyLimit, ctx.io);
+  const usage = await consumeImagine(ctx.storage, ctx.token, ctx.user.id, 'image', request.n, ctx.config.image.dailyLimit, ctx.io);
   const order = [request.provider, ...(ctx.config.image.fallback ? ctx.config.image.providers.map(provider => provider.id).filter(id => id !== request.provider) : [])];
   let result, used, firstError;
   for (const provider of order) {
@@ -201,7 +201,7 @@ async function imageAction(body, ctx) {
 async function videoAction(body, ctx) {
   const request = validateVideoRequest(body, ctx.config);
   const source = request.sourcePath ? await loadSource(request.sourcePath, ctx.user, ctx) : request.inline;
-  const usage = await consumeImagine(ctx.storage, ctx.token, 'video', request.duration, ctx.config.video.dailyLimit, ctx.io);
+  const usage = await consumeImagine(ctx.storage, ctx.token, ctx.user.id, 'video', request.duration, ctx.config.video.dailyLimit, ctx.io);
   const model = ctx.config.video.model;
   let data;
   try {

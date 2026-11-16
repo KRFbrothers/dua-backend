@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { handleVoice, voiceConfiguration } from '../src/core/voice.mjs';
 import { liveConfiguration, validateSessionRequest, buildInstructions, buildSessionConfig, clientSecretRequest, REALTIME_LANGUAGES, LIMITS, VOICE_PROMPT } from '../src/core/voice-live.mjs';
 import { setupConfiguration as setupStatus } from '../src/core/setup.mjs';
-import { voiceEnv, voiceRequest, liveWorld, SUPA } from './voice-helpers.mjs';
+import { voiceEnv, voiceRequest, liveWorld, SUPA, UID } from './voice-helpers.mjs';
 
 const SID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -83,7 +83,7 @@ test('POST /api/voice/session: owner-only token mint with a durable reservation;
   const start = fetcher.find(SUPA + '/rest/v1/rpc/dua_start_voice_session')[0];
   // F-01: the quota RPC runs with the service-role key; the owner was verified before it.
   assert.equal(start.headers.get('authorization'), 'Bearer ' + voiceEnv.SUPABASE_SERVICE_ROLE_KEY);
-  assert.deepEqual({ ...start.json, session_id: 'x' }, { session_id: 'x', reserve_seconds: 600, daily_limit_seconds: 1800, min_seconds: 30 });
+  assert.deepEqual({ ...start.json, session_id: 'x' }, { owner: UID, session_id: 'x', reserve_seconds: 600, daily_limit_seconds: 1800, min_seconds: 30 });
   const mint = fetcher.find('https://api.x.ai/v1/realtime/client_secrets')[0];
   assert.equal(mint.headers.get('authorization'), 'Bearer ' + voiceEnv.GROK_API_KEY);
   assert.deepEqual(mint.json, { expires_after: { seconds: 660 } });
