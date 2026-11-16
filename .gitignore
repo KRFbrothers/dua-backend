@@ -7,3 +7,4 @@ venv/
 !.env.example
 *.pyc
 .pytest_cache/
+.idea/
