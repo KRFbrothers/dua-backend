@@ -97,7 +97,7 @@ Cloud snapshot JSON is `format: "dua-cloud-snapshot"`, `version: 1`, plus `chats
 
 `POST /api/chat` is Personal Agent and Build chat through the configured provider. It does not accept `skills` or `mode: "agent"`. Use the engine for Dua Agent.
 
-Request keys: `model`, `messages`, `attachments`, `memory`, `web`, `stream`, `mode`, `context`, `xSearch`, `code`, `repository`, `projectId`, `persistence`, `personality`.
+Request keys: `model`, `messages`, `attachments`, `memory`, `web`, `stream`, `mode`, `context`, `xSearch`, `code`, `repository`, `projectId`, `persistence`, `personality`, `conversation_id` (or `conversationId`), `agent_id` (or `agentId`).
 
 `model` is `Dua`, `Gemini`, `ChatGPT`, `Claude`, `Grok`, or `Kimi`. `mode` is `auto`, `reasoning`, or `build`. `messages` is `[{ "role": "user"|"model", "text": "", "attachmentText": "", "files": [] }]`. The last message is `user`.
 
@@ -158,7 +158,7 @@ Owner-only relational chat history (`dua_conversations`, `dua_messages`). The AP
 }
 ```
 
-For older messages, pass the first message's `createdAt` as `before`. Messages are saved by `/api/chat` in a later release (PR D). `/api/cloud` is unchanged.
+For older messages, pass the first message's `createdAt` as `before`. `POST /api/chat` accepts an optional `conversation_id`: it saves the user turn before generation starts, and saves the assistant turn with `agent_id`, `model` and usage on completion (PR D). `/api/cloud` is unchanged.
 
 ### Orhan tasks
 

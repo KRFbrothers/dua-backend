@@ -19,6 +19,7 @@ import { GitHubError, GITHUB_REPOSITORY_HINT } from './github.mjs';
 import { resolveOwner, StorageError } from './storage.mjs';
 import { resolveProjectContext, validProjectId } from './projects.mjs';
 import { prepareReplySave, savedReplyStream, validateReplySave } from './reply-persistence.mjs';
+import { prepareConversationChat, UUID, AGENT_ID } from './conversations.mjs';
 import { requestOriginAllowed } from './cors.mjs';
 
 const fileTypes = ['text/plain', 'image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
@@ -71,7 +72,7 @@ export const MAX_HISTORY_BYTES = 2.5 * 1024 * 1024;
 export const MAX_MESSAGES = 400;
 export const MAX_FILES_PER_MESSAGE = 10;
 const MAX_FILE_REFS = 400;
-const CHAT_KEYS = ['model', 'messages', 'attachments', 'memory', 'web', 'stream', 'mode', 'context', 'xSearch', 'code', 'repository', 'projectId', 'persistence', 'personality'];
+const CHAT_KEYS = ['model', 'messages', 'attachments', 'memory', 'web', 'stream', 'mode', 'context', 'xSearch', 'code', 'repository', 'projectId', 'persistence', 'personality', 'conversation_id', 'conversationId', 'agent_id', 'agentId'];
 export function validateChat(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some(key => !CHAT_KEYS.includes(key))) return ['Invalid request.', 400];
   if (!definitions.some(provider => provider.name === data.model)) return ['Select a supported AI model.', 400];
@@ -93,6 +94,17 @@ export function validateChat(data) {
   if (data.mode === 'build' && !['Dua', 'Gemini'].includes(data.model)) return ['Build mode works with Dua or Gemini. Select one of them.', 400];
   if (!validContext(data.context)) return ['Invalid conversation context.', 400];
   if (data.projectId !== undefined && (!validProjectId(data.projectId) || !data.context?.id)) return ['Invalid project context.', 400];
+  const convId = data.conversation_id ?? data.conversationId;
+  if (convId !== undefined) {
+    if (typeof convId !== 'string' || !UUID.test(convId)) return ['Invalid conversation_id.', 400];
+    if (data.persistence) return ['Choose conversation_id or persistence, not both.', 400];
+    data.conversation_id = convId.toLowerCase();
+  }
+  const agentId = data.agent_id ?? data.agentId;
+  if (agentId !== undefined) {
+    if (typeof agentId !== 'string' || !AGENT_ID.test(agentId)) return ['Invalid agent_id.', 400];
+    data.agent_id = agentId;
+  }
   if (data.xSearch !== undefined && typeof data.xSearch !== 'boolean') return ['Invalid X search option.', 400];
   if (data.xSearch === true && data.model !== 'Grok') return ['X search works with Grok only. Select Grok or turn X off.', 400];
   if (data.code !== undefined && typeof data.code !== 'boolean') return ['Invalid Run code option.', 400];
@@ -236,15 +248,20 @@ export async function handleChat(request, { env = process.env, fetcher = fetch, 
     try { prepared = await prepareReplySave(request, data, { env, fetcher }); }
     catch (error) { return json({ error: error.message || 'Server reply save setup failed. Sync and retry.' }, error.status || 503); }
   }
+  let conversationChat;
+  if (data.conversation_id) {
+    try { conversationChat = await prepareConversationChat(request, data, { env, fetcher }); }
+    catch (error) { return json({ error: error.message || 'Conversations storage is temporarily unavailable. Retry.' }, error.status || 502); }
+  }
   try { await resolveProjectContext(request, data, { env, fetcher, cloud: prepared?.cloud }); }
   catch (error) { return json({ error: error.message || 'Project could not be loaded. Sync and retry.' }, error.status || 502); }
   if (prepared) return savedReplyStream(signal => generateValidatedChat(new Request(request.url, { headers: request.headers, signal }), data, { env, fetcher, pageReader, startedAt }), prepared, { signal: request.signal, startedAt, deadlineAt });
-  return generateValidatedChat(request, data, { env, fetcher, pageReader, startedAt });
+  return generateValidatedChat(request, data, { env, fetcher, pageReader, startedAt, conversationChat });
 }
 
-async function generateValidatedChat(request, data, { env, fetcher, pageReader, startedAt }) {
+async function generateValidatedChat(request, data, { env, fetcher, pageReader, startedAt, conversationChat }) {
   const provider = definitions.find(item => item.name === data.model);
-  if (data.mode === 'build') return handleBuildChat(request, data, provider, { env, fetcher, startedAt });
+  if (data.mode === 'build') return handleBuildChat(request, data, provider, { env, fetcher, startedAt, conversationChat });
   let parts;
   try { parts = attachmentParts(data.attachments); }
   catch (error) { return json({ error: error.message }, error.status || 400); }
@@ -263,16 +280,70 @@ async function generateValidatedChat(request, data, { env, fetcher, pageReader, 
     // Flush headers and keep the socket alive BEFORE web/file preparation or provider headers arrive.
     // The signal combines the service deadline with client cancellation, including these initial waits.
     return eventStreamResponse(async (send, streamSignal) => {
-      const failed = await reply(streamSignal, send);
+      let assistantText = '';
+      let streamFailed = false;
+      let doneEvent = null;
+
+      const trackedSend = event => {
+        if (event.type === 'text') assistantText += event.delta;
+        if (event.type === 'error') streamFailed = true;
+        if (event.type === 'done') {
+          doneEvent = event;
+          return;
+        }
+        send(event);
+      };
+
+      const failed = await reply(streamSignal, conversationChat ? trackedSend : send);
       if (failed) {
         const body = await failed.json();
         send({ type: 'error', message: body.error, status: failed.status,
           ...(Number.isInteger(body.upstreamStatus) ? { upstreamStatus: body.upstreamStatus } : {}),
           ...(body.retryAfterSeconds ? { retryAfterSeconds: body.retryAfterSeconds } : {}) });
+        return;
+      }
+      if (conversationChat && doneEvent && !streamFailed && assistantText.trim()) {
+        try {
+          const usage = doneEvent.usage;
+          const tokenCount = Number.isInteger(usage?.totalTokens)
+            ? usage.totalTokens
+            : ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) || null);
+          await conversationChat.commitAssistantMessage({
+            text: assistantText,
+            model: data.model,
+            tokenCount,
+            usage: (usage && typeof usage === 'object') ? usage : null,
+          }, streamSignal);
+        } catch (error) {
+          send({ type: 'error', message: error.message || 'Reply was generated but saving to conversation failed. Retry.', status: error.status || 502 });
+          return;
+        }
+      }
+      if (doneEvent) {
+        send(doneEvent);
       }
     }, { signal: request.signal, onUnexpected: error => console.error('[dua-chat] stream failed', error?.name) });
   }
-  return reply(request.signal);
+  const res = await reply(request.signal);
+  if (conversationChat && res.ok) {
+    const body = await res.json();
+    try {
+      const usage = body.usage;
+      const tokenCount = Number.isInteger(usage?.totalTokens)
+        ? usage.totalTokens
+        : ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) || null);
+      await conversationChat.commitAssistantMessage({
+        text: body.text,
+        model: data.model,
+        tokenCount,
+        usage: (usage && typeof usage === 'object') ? usage : null,
+      }, request.signal);
+      return json(body, res.status, Object.fromEntries(res.headers.entries()));
+    } catch (error) {
+      return json({ error: error.message || 'Reply was generated but saving to conversation failed. Retry.' }, error.status || 502);
+    }
+  }
+  return res;
 }
 
 /** Slow preparation and provider work: JSON replies retain HTTP errors; open streams send error events. */
@@ -378,7 +449,7 @@ async function generateChatReply(request, data, provider, parts, { env, fetcher,
  * signed-in owner (DUA_ALLOWED_EMAIL), then loads the repository before replying, so setup, access and
  * repository errors return a clear HTTP status. Attachments, web search and Run code are not used here.
  */
-async function handleBuildChat(request, data, provider, { env, fetcher, startedAt }) {
+async function handleBuildChat(request, data, provider, { env, fetcher, startedAt, conversationChat }) {
   const signal = request.signal;
   const configured = new Set(providerConfiguration(env).filter(item => item.configured).map(item => item.name));
   const config = buildConfiguration(env, configured);
@@ -411,25 +482,69 @@ async function handleBuildChat(request, data, provider, { env, fetcher, startedA
   const start = { repository: prepared.repository, branch: prepared.branch, files: [], rounds: 0, searches: 0 };
   if (data.stream === true) {
     return eventStreamResponse(async (send, streamSignal) => {
-      send({ type: 'build', ...start });
-      if (notice) send({ type: 'notice', message: notice });
+      let assistantText = '';
+      let streamFailed = false;
+      let doneEvent = null;
+      const trackedSend = event => {
+        if (event.type === 'text') assistantText += event.delta;
+        if (event.type === 'error') streamFailed = true;
+        if (event.type === 'done') { doneEvent = event; return; }
+        send(event);
+      };
+      const activeSend = conversationChat ? trackedSend : send;
+      activeSend({ type: 'build', ...start });
+      if (notice) activeSend({ type: 'notice', message: notice });
       try {
-        const result = await run(streamSignal, build => send({ type: 'build', ...build }));
-        send({ type: 'build', ...result.build });
-        if (result.proposal) send({ type: 'proposal', ...result.proposal });
+        const result = await run(streamSignal, build => activeSend({ type: 'build', ...build }));
+        activeSend({ type: 'build', ...result.build });
+        if (result.proposal) activeSend({ type: 'proposal', ...result.proposal });
         const text = result.text.slice(0, MAX_REPLY_CHARS);
-        for (let index = 0; index < text.length; index += 4000) send({ type: 'text', delta: text.slice(index, index + 4000) });
-        send({ type: 'done', truncated: Boolean(result.truncated || result.text.length > MAX_REPLY_CHARS), ...(result.usage ? { usage: result.usage } : {}) });
+        for (let index = 0; index < text.length; index += 4000) activeSend({ type: 'text', delta: text.slice(index, index + 4000) });
+        activeSend({ type: 'done', truncated: Boolean(result.truncated || result.text.length > MAX_REPLY_CHARS), ...(result.usage ? { usage: result.usage } : {}) });
       } catch (error) {
         let failed;
         try { failed = await failure(error, streamSignal); } catch { failed = json({ error: 'Build mode stopped or timed out. Retry.' }, 504); }
         const body = await failed.json().catch(() => ({}));
-        send({ type: 'error', message: body.error || 'Build mode failed. Retry.', status: failed.status });
+        activeSend({ type: 'error', message: body.error || 'Build mode failed. Retry.', status: failed.status });
       }
+      if (conversationChat && doneEvent && !streamFailed && assistantText.trim()) {
+        try {
+          const usage = doneEvent.usage;
+          const tokenCount = Number.isInteger(usage?.totalTokens)
+            ? usage.totalTokens
+            : ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) || null);
+          await conversationChat.commitAssistantMessage({
+            text: assistantText,
+            model: data.model,
+            tokenCount,
+            usage: (usage && typeof usage === 'object') ? usage : null,
+          }, streamSignal);
+        } catch (error) {
+          send({ type: 'error', message: error.message || 'Reply was generated but saving to conversation failed. Retry.', status: error.status || 502 });
+          return;
+        }
+      }
+      if (doneEvent) send(doneEvent);
     }, { signal, onUnexpected: error => console.error('[dua-build] stream failed', error?.name) });
   }
   try {
     const result = await run(signal);
+    if (conversationChat) {
+      try {
+        const usage = result.usage;
+        const tokenCount = Number.isInteger(usage?.totalTokens)
+          ? usage.totalTokens
+          : ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) || null);
+        await conversationChat.commitAssistantMessage({
+          text: result.text.slice(0, MAX_REPLY_CHARS),
+          model: data.model,
+          tokenCount,
+          usage: (usage && typeof usage === 'object') ? usage : null,
+        }, signal);
+      } catch (error) {
+        return json({ error: error.message || 'Reply was generated but saving to conversation failed. Retry.' }, error.status || 502);
+      }
+    }
     return json({ text: result.text.slice(0, MAX_REPLY_CHARS), build: result.build, ...(result.proposal ? { proposal: result.proposal } : {}), ...(result.truncated ? { truncated: true } : {}), ...(notice ? { notice } : {}) });
   } catch (error) { return failure(error, signal); }
 }
