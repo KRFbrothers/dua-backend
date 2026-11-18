@@ -25,11 +25,11 @@ Errors are JSON `{ "error": "..." }` with `Cache-Control: no-store`, unless a ro
 
 ## Pinned agents
 
-There is no agent-create endpoint. Two roles are fixed.
+Two roles are pinned and cannot be deleted (`personal-agent` and `dua-agent`). Custom agents and skills can be created, updated, and deleted via `/api/agents` and `/api/skills`.
 
-**Personal Agent.** Normal chat. The engine system prompt is `You are Dua AI, a helpful, smart, and polite personal AI assistant.` The client may add `personality` (max 1000 characters), `systemInstruction` (max 20000 characters), and `memory`. Those are appended under the server prompt and cannot replace it.
+**Personal Agent.** Fast everyday chat, thinking, and quick tasks (`mode: "auto"`). The engine system prompt is `You are Dua AI, a helpful, smart, and polite personal AI assistant.` The client may add `personality` (max 1000 characters), `systemInstruction` (max 20000 characters), and `memory`. Those are appended under the server prompt and cannot replace it.
 
-**Dua Agent.** Engine `POST /api/chat` with `"mode": "agent"` and `"stream": true`. The client sends skill ids only. The server appends the Super Agent prompt and the skill bodies, in this order:
+**Dua Agent.** Specialized skills and multi-step tasks (`mode: "agent"`). The client sends skill ids in `skills`. The server appends the Super Agent prompt and active skill bodies. 5 starter skills are built-in from `dua_agent_prompts.json`:
 
 | Id | Title |
 |---|---|
@@ -39,7 +39,7 @@ There is no agent-create endpoint. Two roles are fixed.
 | `devops-automator` | DevOps Automator |
 | `code-reviewer` | Code Reviewer |
 
-Unknown, duplicate, or non-agent `skills` return `400` `{ "error": "Invalid skills." }`.
+Starter skills cannot be deleted, but can be enabled or disabled via `PUT /api/skills/:id`. Custom skills created via `POST /api/skills` can also be passed in `skills`. All skill ids must match `^[a-z0-9][a-z0-9-]{0,63}$`. Duplicate skill ids or skills in non-agent modes return `400` `{ "error": "Invalid skills." }`.
 
 ## Auth header
 
@@ -159,6 +159,67 @@ Owner-only relational chat history (`dua_conversations`, `dua_messages`). The AP
 ```
 
 For older messages, pass the first message's `createdAt` as `before`. `POST /api/chat` accepts an optional `conversation_id`: it saves the user turn before generation starts, and saves the assistant turn with `agent_id`, `model` and usage on completion (PR D). `/api/cloud` is unchanged.
+
+### Agents and skills
+
+Owner-only custom agents and specialized skills (`dua_agents`, `dua_agent_skills`). The API uses the owner's token and the anon key only. Every response is `Cache-Control: no-store`; errors are `{ "error": "..." }`. `:id` is a slug matching `^[a-z0-9][a-z0-9-]{0,63}$` (anything else is `404`), wrong methods are `405`, and bodies are limited to 64 KB.
+
+#### Agents
+
+| Method and path | Request | Response |
+|---|---|---|
+| `GET /api/agents` | none | `{ "agents": [ agent ] }`, pinned first, then most recently updated |
+| `POST /api/agents` | `{ "id"?: "slug", "name": "Name", "description"?: "", "mode"?: "auto"\|"agent"\|"reasoning"\|"build", "systemPrompt"?: "", "model"?: null, "pinned"?: false }` | `201` `{ "agent": agent }`. Official agent IDs (`personal-agent`, `dua-agent`) cannot be created via POST |
+| `GET /api/agents/:id` | none | `{ "agent": agent }`, `404` when not found |
+| `PUT /api/agents/:id` | `{ "name"?: "", "description"?: "", "mode"?: "", "systemPrompt"?: "", "model"?: null, "pinned"?: false }` | `{ "agent": agent }`. For official agents, custom overrides are persisted; mode and id are immutable |
+| `DELETE /api/agents/:id` | none | `204`, `404` when not found. Official agents cannot be deleted (`400`) |
+| `POST /api/agents/generate-prompt` | `{ "name"?: "", "description": "What this agent does...", "mode"?: "auto" }` | `{ "systemPrompt": "Generated system prompt..." }`. Requires chat access / daily quota |
+
+```json
+{
+  "agent": {
+    "id": "code-assistant",
+    "name": "Code Assistant",
+    "description": "Helps write and debug code.",
+    "mode": "auto",
+    "systemPrompt": "You are an expert programmer...",
+    "model": null,
+    "pinned": false,
+    "isOfficial": false,
+    "createdAt": "ISO-8601",
+    "updatedAt": "ISO-8601"
+  }
+}
+```
+
+#### Skills
+
+Starter skills are loaded directly from `dua_agent_prompts.json` without requiring database seeding. The database stores user-created skills and starter overrides (enable/disable).
+
+| Method and path | Request | Response |
+|---|---|---|
+| `GET /api/skills` | none | `{ "skills": [ skill ] }`, starter skills first, followed by custom skills |
+| `POST /api/skills` | `{ "id"?: "slug", "agentId"?: "dua-agent", "title": "Title", "summary"?: "", "body"?: "", "enabled"?: true }` | `201` `{ "skill": skill }`. Starter skill IDs cannot be created via POST (`409`, use PUT) |
+| `GET /api/skills/:id` | none | `{ "skill": skill }`, `404` when not found |
+| `PUT /api/skills/:id` | `{ "title"?: "", "summary"?: "", "body"?: "", "enabled"?: true, "agentId"?: "" }` | `{ "skill": skill }`. For starter skills, overrides (e.g. enable/disable) are persisted |
+| `DELETE /api/skills/:id` | none | `204`, `404` when not found. Starter skills cannot be deleted (`400`, disable them instead) |
+| `POST /api/skills/generate` | `{ "title"?: "", "description": "What this skill does..." }` | `{ "skill": { "title": "...", "summary": "...", "body": "..." } }`. Requires chat access / daily quota |
+
+```json
+{
+  "skill": {
+    "id": "frontend-developer",
+    "agentId": "dua-agent",
+    "title": "Frontend Developer",
+    "summary": "Specialized in UI components and styling",
+    "body": "Markdown instructions...",
+    "enabled": true,
+    "isStarter": true,
+    "createdAt": null,
+    "updatedAt": null
+  }
+}
+```
 
 ### Orhan tasks
 

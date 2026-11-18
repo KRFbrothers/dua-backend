@@ -16,6 +16,7 @@ import { handleWorkflowAutomation } from '../core/workflow-automation.mjs';
 import { handleBuildPr } from '../core/build-pr.mjs';
 import { handleArtifactsMemories } from '../core/artifacts-memories.mjs';
 import { handleConversations } from '../core/conversations.mjs';
+import { handleAgentsSkills } from '../core/agents-skills.mjs';
 import { withRequestLog } from '../core/request-logging.mjs';
 import { switchResponse, killSwitches, PAUSED } from '../core/kill-switches.mjs';
 import { applyCors, corsPreflight, requestOriginAllowed } from '../core/cors.mjs';
@@ -70,6 +71,8 @@ async function routeService(request,{env=process.env,fetcher=fetch}={}) {
  if(path==='/api/artifacts'||path.startsWith('/api/artifacts/')||path==='/api/memories'||path.startsWith('/api/memories/'))return handleArtifactsMemories(request,{env,fetcher});
  // Conversations and messages: owner-only (Supabase sign-in + DUA_ALLOWED_EMAIL), user token + anon key, checked inside handleConversations.
  if(path==='/api/conversations'||path.startsWith('/api/conversations/'))return handleConversations(request,{env,fetcher});
+ // Agents and skills: owner-only (Supabase sign-in + DUA_ALLOWED_EMAIL), user token + anon key, checked inside handleAgentsSkills.
+ if(path==='/api/agents'||path.startsWith('/api/agents/')||path==='/api/skills'||path.startsWith('/api/skills/'))return handleAgentsSkills(request,{env,fetcher});
  if(['/api/chat','/api/search','/api/connectors/github'].includes(path)) {
   if(request.method!=='POST')return Response.json({error:'Method not allowed.'},{status:405,headers:{'Cache-Control':'no-store'}});
   const advanced=path==='/api/connectors/github';
@@ -96,11 +99,11 @@ const validTurn=m=>!!m&&typeof m==='object'&&!Array.isArray(m)&&typeof m.role===
 // The engine reads only `text`; turn `content` (string or parts) into text and drop `content`.
 const normalizeTurn=({content,...m})=>typeof m.text==='string'?m:{...m,text:typeof content==='string'?content:content.filter(p=>p&&typeof p.text==='string').map(p=>p.text).join('')};
 const noStore=(error,status)=>Response.json({error},{status,headers:{'Cache-Control':'no-store'}});
-const DUA_AGENT_SKILL_IDS=['frontend-developer','backend-architect','api-tester','devops-automator','code-reviewer'];
+const SKILL_ID=/^[a-z0-9][a-z0-9-]{0,63}$/;
 function duaAgentSkills(data,mode){
  if(!Object.prototype.hasOwnProperty.call(data,'skills'))return undefined;
  const skills=data.skills;
- if(mode!=='agent'||!Array.isArray(skills)||skills.length>DUA_AGENT_SKILL_IDS.length||new Set(skills).size!==skills.length||skills.some(id=>!DUA_AGENT_SKILL_IDS.includes(id)))return null;
+ if(mode!=='agent'||!Array.isArray(skills)||skills.length>100||new Set(skills).size!==skills.length||skills.some(id=>typeof id!=='string'||!SKILL_ID.test(id)))return null;
  return skills;
 }
 const engineUrl=env=>engineEndpoint(env,'/api/chat');

@@ -109,14 +109,13 @@ shipped behaviour; this file describes the target and the order of work.
   token or usage. The database trigger updates `last_message_at` and `last_message_preview`.
 - Requests without `conversation_id` and the engine path are unchanged.
 
-### PR E: agents and skills
+### PR E: agents and skills (completed)
 
-- Tables `dua_agents` and `dua_agent_skills`.
-- Agents CRUD. The official `personal-agent` and `dua-agent` cannot be deleted.
-- `POST /api/agents/generate-prompt` and `POST /api/skills/generate` in Node, using the existing
-  providers and the existing quota guard.
-- Skills CRUD for user-created skills and overrides only (decision 2). This PR also removes the Node
-  duplicate skill list and the static size cap.
+- Tables `dua_agents` and `dua_agent_skills` with owner-only RLS and delete protection on official agents.
+- Agents CRUD: official `personal-agent` and `dua-agent` pinned and protected from deletion.
+- AI generators: `POST /api/agents/generate-prompt` and `POST /api/skills/generate` in Node using Gemini with quota guard.
+- Skills CRUD: starter skills loaded without DB seed, overrides persisted, custom skills created/deleted.
+- Unlimited skills: removed static skill cap in Python engine (`MAX_COMPOSED_PROMPT_CHARS = 120_000` guard) and Node web chat (`SKILL_ID` regex).
 
 ## 4. Out of scope until separately approved
 
