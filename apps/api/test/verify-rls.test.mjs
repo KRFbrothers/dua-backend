@@ -4,7 +4,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { verifyRls, main, DEFAULT_TABLES } from '../scripts/verify-rls.mjs';
 
-const MIGRATIONS = fileURLToPath(new URL('../../../infra/database/migrations/', import.meta.url));
+const MIGRATIONS = fileURLToPath(new URL('../../../supabase/migrations/', import.meta.url));
 
 test('DEFAULT_TABLES matches every table created by the migrations', async () => {
   const files = (await readdir(MIGRATIONS)).filter(f => f.endsWith('.sql'));
@@ -16,7 +16,7 @@ test('DEFAULT_TABLES matches every table created by the migrations', async () =>
       created.add(match[1].toLowerCase());
   }
   assert.deepEqual([...created].sort(), [...DEFAULT_TABLES].sort(),
-    'DEFAULT_TABLES drifted from infra/database/migrations \u2014 update scripts/verify-rls.mjs');
+    'DEFAULT_TABLES drifted from supabase/migrations \u2014 update scripts/verify-rls.mjs');
 });
 
 const env = { SUPABASE_URL: 'https://project.supabase.co', SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_mock_public_key' };

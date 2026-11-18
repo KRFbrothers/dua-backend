@@ -8,3 +8,5 @@ venv/
 *.pyc
 .pytest_cache/
 .idea/
+supabase/.temp
+supabase/.branches

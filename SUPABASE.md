@@ -7,35 +7,46 @@ Supabase provides Google-backed accounts, device logout, the authoritative serve
 1. Reuse the existing Supabase project for this app. Create a project only when setting up a separate installation, retaining its database password securely.
 2. In Authentication → Providers, enable Google (see [Native Google sign-in](#native-google-sign-in)). Keep Google enabled. For the new email flow, enable Email and keep **Confirm email on**; see [Owner email login and signup](#owner-email-login-and-signup). Password reset/recovery routes are not implemented.
 3. In Authentication → URL Configuration, review Site URL and the allowed redirect URLs. The removed web client used `https://YOUR-SITE/profile.html` (and the web Google OAuth flow used `/api/account/oauth/callback`); neither page exists any more, so remove those redirect entries. The Android app does not consume confirmation or redirect links (native Google sign-in needs none). Set Site URL to an HTTPS page you control (for example your backend origin); the confirmation itself succeeds regardless of where the browser lands afterwards.
-4. Run `infra/database/migrations/202610040001_dua_cloud.sql` in the SQL editor. It creates the snapshot table, owner-only read policy and authenticated revision-checked write function. Do not disable RLS or grant direct snapshot writes to app users.
+4. Apply `supabase/migrations/202610040001_dua_cloud.sql` using the [CLI workspace](#repository-paths-and-cli-workspace) workflow (not a casual `db push`). It creates the snapshot table, owner-only read policy and authenticated revision-checked write function. Do not disable RLS or grant direct snapshot writes to app users.
 
-## Repository paths and optional CLI workspace
+## Repository paths and CLI workspace
 
-Checked-in migrations now live in `infra/database/migrations/`; their filenames
-and SQL contents are unchanged. This directory move does not require reapplying
-migrations or changing the deployed Supabase project. The SQL editor instructions
-below use the new paths.
+Checked-in migrations live in `supabase/migrations/`. This repository includes
+`supabase/config.toml` (`project_id = "dua-backend"`, `[db.seed] enabled = false`).
+Run the CLI from the repository root with `npx supabase` (do not add it as a
+package dependency). Never commit an access token, database password,
+`supabase/.env`, `supabase/.temp` or `supabase/.branches`.
 
-There is no versioned `config.toml`, initialized CLI workspace or migration runner
-in this repository. The Supabase CLI normally reads a `supabase/` directory under
-its project root; `--workdir` selects that project root, not an arbitrary migration
-directory ([official configuration guide](https://supabase.com/docs/guides/local-development/managing-config)).
-Do not assume `cd infra/database` makes `supabase db push` use these files.
-If you already use a separate initialized and linked CLI workspace, keep running
-the CLI from its root and make its `supabase/migrations` point to this checkout's
-`infra/database/migrations` (for example with a local symlink). Keep one migration
-source, preserve existing local configuration/link state, and review the CLI's
-dry-run before applying any future migration. No CLI setup or database command
-is needed just to adopt this path move.
+Create a new migration with:
 
-Some unchanged backend setup messages still mention the former migration path;
-use `infra/database/migrations/` when locating the named SQL file.
+```bash
+npx supabase migration new your_change_description
+```
+
+That writes a 14-digit timestamped file under `supabase/migrations/`. Do not
+rename the existing 12-digit version prefixes; the CLI version id is the digit
+prefix of the filename.
+
+Applying migrations to the hosted project is a live-database change. Do not run
+`npx supabase link` or `npx supabase db push` without explicit owner approval.
+After that approval, the sequence is:
+
+1. `npx supabase login` (the access token stays in the CLI credential store, never in git).
+2. `npx supabase link --project-ref <ref>` (the project ref is stored under gitignored `supabase/.temp`).
+3. `npx supabase migration list --remote` to compare local files with `supabase_migrations.schema_migrations`. That history table may not exist yet, because earlier migrations were applied in the SQL editor.
+4. For versions already applied in production, mark history without re-running SQL:
+
+   `npx supabase migration repair --status applied <version> ... --remote`
+
+   Do **not** blindly repair every file. `20261102183410_workflow_identity_recovery.sql` is commented "not applied" and `20261102183411_workflow_automation.sql` is commented "source only". Repairing a never-applied version skips SQL that production may still need. Confirm the live schema (or a dry-run) first.
+5. `npx supabase db push --dry-run --remote` and review the plan.
+6. A real `npx supabase db push --remote` only after a further explicit owner approval. Never run `npx supabase db reset --remote` on production.
 
 ## Anonymous access smoke check
 
 Use Node 24+ from `apps/api/` with `SUPABASE_URL` and `SUPABASE_ANON_KEY` (or `SUPABASE_PUBLISHABLE_KEY`) exported, then run `npm run verify:rls`. For an ignored local `.env` instead, run `node --env-file-if-exists=.env scripts/verify-rls.mjs`. Do not use a user access token, secret key or service-role key. The URL must be the project root, not `/rest/v1/`. Missing credentials print a helpful SKIP and exit 0; configuration, network and unverified access results exit 1. The script never prints keys or returned row contents.
 
-The default table list is every table created by `infra/database/migrations/` (14 tables: `dua_cloud_snapshots`, `dua_daily_usage`, `dua_imagine_usage`, `dua_voice_usage`, `dua_voice_sessions`, `agent_notes`, `dua_workflow_runs`, `dua_workflow_executions`, `dua_workflow_credentials`, `dua_workflow_automation`, `dua_workflow_deliveries`, `dua_orhan_tasks`, `dua_artifacts`, `dua_memories`). Running `npm run verify:rls` with no arguments checks all of them:
+The default table list is every table created by `supabase/migrations/` (14 tables: `dua_cloud_snapshots`, `dua_daily_usage`, `dua_imagine_usage`, `dua_voice_usage`, `dua_voice_sessions`, `agent_notes`, `dua_workflow_runs`, `dua_workflow_executions`, `dua_workflow_credentials`, `dua_workflow_automation`, `dua_workflow_deliveries`, `dua_orhan_tasks`, `dua_artifacts`, `dua_memories`). Running `npm run verify:rls` with no arguments checks all of them:
 
 ```sh
 cd apps/api
@@ -52,7 +63,7 @@ The credential-free backend test suite verifies these outcomes with mocked respo
 
 ## 1b. Stored files bucket (Phase 2: uploads, PDFs, spreadsheets, audio)
 
-Run `infra/database/migrations/202610080001_dua_files_storage.sql` once (SQL editor → New query → paste → Run, or `supabase db push` from a linked CLI project). It:
+Apply `supabase/migrations/202610080001_dua_files_storage.sql` once, using the [CLI workspace](#repository-paths-and-cli-workspace) workflow. It:
 
 - creates a **private** bucket `dua-files` with a 50 MB per-file limit (52,428,800 bytes) and an allowed MIME list (images, PDF, XLSX/XLS/ODS/CSV, TXT/MD/JSON, common audio types);
 - adds RLS policies on `storage.objects` so a signed-in user can only **select, insert and delete** objects whose first folder is their own `auth.uid()`. There is no update policy: files are immutable and uploads use `x-upsert: false`.
@@ -87,11 +98,11 @@ Per-file cleanup checks the owner's current server snapshot with the same owner 
 
 ## 1c. Imagine (Phase 3: generated images and videos)
 
-Run `infra/database/migrations/202610090001_dua_imagine.sql` once, after the §1b migration (SQL editor → New query → paste → Run, or `supabase db push`). It is safe to run again. It:
+Apply `supabase/migrations/202610090001_dua_imagine.sql` once, after the §1b migration, using the [CLI workspace](#repository-paths-and-cli-workspace) workflow. It is safe to run again. It:
 
 - adds `video/mp4` to the `dua-files` bucket's allowed MIME list (nothing else about the bucket changes: still private, 50 MB per file, owner-folder policies);
 - creates `public.dua_imagine_usage` (per account and UTC day: images and video seconds; RLS on, no client access);
-- creates `dua_consume_imagine(feature, amount, daily_limit)` and `dua_read_imagine_usage()`, `security definer` functions that only act on `auth.uid()`. The backend calls them with your own token, so no service-role key is needed. They can only add usage, never reset it.
+- creates Imagine usage RPCs as `security definer` functions (they can only add usage, never reset it). After `202611140001_revoke_quota_authenticated.sql` and `202611160001_owner_scoped_quota_rpcs.sql`, `dua_consume_imagine(owner uuid, feature, amount, daily_limit)` is executable by `service_role` only. The backend verifies the caller is the configured owner (`resolveOwner` / `owner_auth`) and passes that user's id; it does not use `auth.uid()`, which is empty on a service-role call. `dua_read_imagine_usage()` still runs with the owner's own token and uses `auth.uid()`.
 
 Generated files live next to your uploads under `<your user id>/`. Deleting or clearing cached chats keeps those files available for server restore. **Delete all uploaded files** permanently removes them; account deletion also attempts file cleanup. Discarded unsent uploads are cleaned up separately. Cloud snapshots keep references to generated images and videos (paths only, never bytes).
 
@@ -101,10 +112,10 @@ Without this migration the backend refuses Imagine requests with a setup message
 
 ## 1d. Live voice minutes (Phase 4: realtime voice)
 
-Run `infra/database/migrations/202610100001_dua_voice.sql` once (SQL editor → New query → paste → Run, or `supabase db push`). It is safe to run again and does not change earlier tables. It:
+Apply `supabase/migrations/202610100001_dua_voice.sql` once, using the [CLI workspace](#repository-paths-and-cli-workspace) workflow. It is safe to run again and does not change earlier tables. It:
 
 - creates `public.dua_voice_usage` (seconds charged per account and UTC day) and `public.dua_voice_sessions` (one row per live session: reserved seconds, start, end, charged seconds); RLS on, no client access;
-- creates `dua_start_voice_session(session_id, reserve_seconds, daily_limit_seconds, min_seconds)`, `dua_end_voice_session(session_id)` and `dua_read_voice_usage()`, `security definer` functions that only act on `auth.uid()`. The backend calls them with your own token (no service-role key). Starting a session reserves minutes under a row lock, so the daily cap holds even with parallel requests; ending charges the time used (never more than reserved); sessions left open are charged their full reservation once overdue.
+- creates live-voice RPCs as `security definer` functions. After the same F-01 and owner-scoped migrations, `dua_start_voice_session(owner uuid, session_id, reserve_seconds, daily_limit_seconds, min_seconds)` is executable by `service_role` only; the backend verifies the owner and passes that user's id. `dua_end_voice_session(session_id)` and `dua_read_voice_usage()` still run with the owner's own token on `auth.uid()`. Starting a session reserves minutes under a row lock, so the daily cap holds even with parallel requests; ending charges the time used (never more than reserved); sessions left open are charged their full reservation once overdue.
 
 Without this migration `/api/voice/session` refuses with a setup message and live voice never starts (hands-free mode still works).
 
