@@ -137,6 +137,29 @@ Owner storage. `POST` bodies are JSON.
 | `POST /api/voice/session-end` | `{ "sessionId": "uuid" }` | `{ "chargedSeconds": 0, "usedSeconds": 0, "limitSeconds": 0 }` |
 | `GET /api/voice/usage` | none | live-voice usage JSON |
 
+### Conversations
+
+Owner-only relational chat history (`dua_conversations`, `dua_messages`). The API uses the owner's token and the anon key only. Every response is `Cache-Control: no-store`; errors are `{ "error": "..." }`. `:id` is a UUID (anything else is `404`), wrong methods are `405`, and bodies are limited to 16 KB.
+
+| Method and path | Request | Response |
+|---|---|---|
+| `GET /api/conversations?q=&limit=50&offset=0` | none. `q` matches titles literally (max 100 characters), `limit` 1–100, `offset` 0–10000 | `{ "conversations": [ conversation ], "limit": 50, "offset": 0, "hasMore": false }`, pinned first, then most recent |
+| `POST /api/conversations` | `{ "id"?: "uuid", "title"?: "", "agentId"?: "dua-agent" }` title 1–200 characters | `201` `{ "conversation": conversation }`. Repeating a client `id` returns the saved row; an id owned elsewhere is `409` |
+| `GET /api/conversations/:id/messages?limit=200&before=ISO` | none. `limit` 1–500, `before` an ISO-8601 timestamp | `{ "messages": [ message ], "hasMore": false }`, oldest first; `404` when the conversation is not the owner's |
+| `PUT /api/conversations/:id/pin` | `{ "pinned": true }` | `{ "conversation": conversation }`, `404` when not found |
+| `DELETE /api/conversations/:id` | none | `204`, `404` when not found. Its messages are deleted too |
+
+```json
+{
+  "conversation": { "id": "uuid", "agentId": "dua-agent", "title": "New chat", "pinned": false,
+    "lastMessagePreview": "", "lastMessageAt": "ISO-8601", "createdAt": "ISO-8601" },
+  "message": { "id": "uuid", "conversationId": "uuid", "agentId": null, "role": "user", "content": "",
+    "model": null, "tokenCount": null, "usage": null, "createdAt": "ISO-8601" }
+}
+```
+
+For older messages, pass the first message's `createdAt` as `before`. Messages are saved by `/api/chat` in a later release (PR D). `/api/cloud` is unchanged.
+
 ### Orhan tasks
 
 One running task. Research, then Checker, then Writer. Max 12 steps and 10 minutes.

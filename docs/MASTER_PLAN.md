@@ -63,7 +63,7 @@ shipped behaviour; this file describes the target and the order of work.
 
 ## 3. Roadmap: 5 small PRs (A → B → C → D → E)
 
-### PR A: plan, owner fail-fast, shared engine client (this PR)
+### PR A: plan, owner fail-fast, shared engine client (done: PR #18)
 
 - This file, linked from `AGENTS.md`.
 - `dua-api` refuses to start in production when `DUA_ALLOWED_EMAIL` is missing, empty or invalid
@@ -77,13 +77,13 @@ shipped behaviour; this file describes the target and the order of work.
   - an engine (Python) startup owner check;
   - reusing `engineEndpoint` in `workflow-runtime.mjs`, which has its own startup URL check.
 
-### PR B: engine handler modularization (no behaviour change)
+### PR B: engine handler modularization (no behaviour change; B1 done: PR #19)
 
 - Split `apps/ai-engine/app.py` (about 1,600 lines) into modules under `apps/ai-engine/dua_engine/`,
   using the existing `register_*_routes(app)` pattern (see `dua_engine/orhan/routes.py`).
 - Same routes, payloads, status codes and tests. No new features.
 
-### PR C: relational conversations
+### PR C: relational conversations (this PR)
 
 - Migration `supabase/migrations/202611190001_<name>.sql` creates the clean tables `dua_conversations`
   and `dua_messages`, with RLS `owner_id = (select auth.uid())` on every policy.
@@ -95,6 +95,11 @@ shipped behaviour; this file describes the target and the order of work.
   - `PUT /api/conversations/:id/pin`
   - `DELETE /api/conversations/:id`
 - `/api/cloud` and `dua_cloud_snapshots` stay as they are.
+- Shipped as `202611190001_dua_conversations_messages.sql` and `apps/api/src/core/conversations.mjs`:
+  uuid ids (an optional client id makes a retried create safe), `timestamptz`, `agent_id` slug
+  (no foreign key until PR E), a composite `(conversation_id, owner_id)` foreign key, a trigger-kept
+  `last_message_preview`, literal title search, limit/offset and `before` paging, hard delete with
+  cascade, nullable `model`, `token_count` and `usage`. Messages are read-only until PR D.
 
 ### PR D: chat persistence via `conversation_id`
 

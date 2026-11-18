@@ -15,6 +15,7 @@ import { handleWorkflowExecution } from '../core/workflow-execution.mjs';
 import { handleWorkflowAutomation } from '../core/workflow-automation.mjs';
 import { handleBuildPr } from '../core/build-pr.mjs';
 import { handleArtifactsMemories } from '../core/artifacts-memories.mjs';
+import { handleConversations } from '../core/conversations.mjs';
 import { withRequestLog } from '../core/request-logging.mjs';
 import { switchResponse, killSwitches, PAUSED } from '../core/kill-switches.mjs';
 import { applyCors, corsPreflight, requestOriginAllowed } from '../core/cors.mjs';
@@ -67,6 +68,8 @@ async function routeService(request,{env=process.env,fetcher=fetch}={}) {
  // Artifacts and Memory lists: owner-only (Supabase sign-in + DUA_ALLOWED_EMAIL), checked inside
  // handleArtifactsMemories. Both resources share one handler, so one dispatch covers both.
  if(path==='/api/artifacts'||path.startsWith('/api/artifacts/')||path==='/api/memories'||path.startsWith('/api/memories/'))return handleArtifactsMemories(request,{env,fetcher});
+ // Conversations and messages: owner-only (Supabase sign-in + DUA_ALLOWED_EMAIL), user token + anon key, checked inside handleConversations.
+ if(path==='/api/conversations'||path.startsWith('/api/conversations/'))return handleConversations(request,{env,fetcher});
  if(['/api/chat','/api/search','/api/connectors/github'].includes(path)) {
   if(request.method!=='POST')return Response.json({error:'Method not allowed.'},{status:405,headers:{'Cache-Control':'no-store'}});
   const advanced=path==='/api/connectors/github';
