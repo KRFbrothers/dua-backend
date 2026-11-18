@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
 
-// Every table created by infra/database/migrations/. Keep in sync with the
+// Every table created by supabase/migrations/. Keep in sync with the
 // migrations directory; test/verify-rls.test.mjs fails if this list drifts.
 export const DEFAULT_TABLES = Object.freeze([
   'dua_cloud_snapshots', 'dua_daily_usage', 'dua_imagine_usage', 'dua_voice_usage', 'dua_voice_sessions',

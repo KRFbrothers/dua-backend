@@ -76,3 +76,5 @@ Before starting any task, verify that the required tools are installed and acces
   - *If missing:* Install REA globally via npm (`rea-agents` from [github.com/morluto/rea](https://github.com/morluto/rea)), verify setup with `rea doctor`, and download Apktool from [apktool.org](https://apktool.org/) if APK resource inspection is needed.
 - **Google Cloud CLI (`gcloud`)** (Optional, for checking or deploying `dua-backend` on Cloud Run)
   - *If missing:* Download from [cloud.google.com/sdk/docs/install](https://cloud.google.com/sdk/docs/install) and sign in to the project's Google Cloud account.
+- **Supabase CLI (`npx supabase`)** (Optional, for migration files under `supabase/migrations/` and the workflow in `SUPABASE.md`)
+  - *If missing:* From the `dua-backend` repo root run `npx supabase --version`. Do not add the CLI as a package dependency. Never commit an access token, database password or `supabase/.env`. Never run `npx supabase link` or `npx supabase db push` without explicit owner approval.

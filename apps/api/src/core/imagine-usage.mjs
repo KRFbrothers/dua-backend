@@ -1,11 +1,11 @@
-// Durable per-feature daily caps for Imagine (Supabase RPCs from infra/database/migrations/202610090001_dua_imagine.sql).
+// Durable per-feature daily caps for Imagine (Supabase RPCs from supabase/migrations/202610090001_dua_imagine.sql).
 // F-01: dua_consume_imagine is service_role-only, so the cap is charged with the server's service-role key.
 // The caller is still verified as the owner upstream (resolveOwner) and that user's id is sent as `owner`
 // (202611160001_owner_scoped_quota_rpcs.sql); the limit is chosen by the server, never the client.
 import { readJsonLimited } from './limited-json.mjs';
 import { ImagineError } from './imagine-providers.mjs';
 
-const SETUP = 'Imagine usage caps need the Phase 3 Supabase migration (infra/database/migrations/202610090001_dua_imagine.sql). Run it in the Supabase SQL editor.';
+const SETUP = 'Imagine usage caps need the Phase 3 Supabase migration (supabase/migrations/202610090001_dua_imagine.sql). Run it in the Supabase SQL editor.';
 
 async function rpc(config, token, name, body, { fetcher = fetch, signal, service = false } = {}) {
   const serviceKey = service ? String(config.serviceRoleKey || '').trim() : '';
