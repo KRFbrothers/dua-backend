@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleService } from '../src/server/service-handler.mjs';
 import { searchPattern } from '../src/core/conversations.mjs';
+import { validateChat } from '../src/core/providers.mjs';
 import { filesEnv, router, SUPA, UID, OTHER } from './files-helpers.mjs';
+import { readEvents, sseResponse, sse } from './helpers.mjs';
 
 const env = filesEnv;
 const C1 = 'aaaaaaaa-0000-4000-8000-000000000001';
@@ -83,6 +85,13 @@ function database() {
         return Response.json({ message: 'duplicate' }, { status: 409 });
       }
       rows.push(row);
+      if (table === 'dua_messages') {
+        const conv = conversations.find(c => c.id === row.conversation_id && c.owner_id === row.owner_id);
+        if (conv) {
+          conv.last_message_at = row.created_at;
+          conv.last_message_preview = (row.content || '').replace(/\s+/g, ' ').slice(0, 200);
+        }
+      }
       return Response.json([row], { status: 201 });
     }
     if (method === 'PATCH') {
@@ -354,4 +363,155 @@ test('upstream failures map to safe messages without leaking upstream text', asy
     assert.equal(response.status, expected, String(status));
     assert.doesNotMatch(await response.text(), /internal detail/);
   }
+});
+
+test('validateChat validates conversation_id, conversationId, agent_id and conflicts with persistence', () => {
+  const base = { model: 'Dua', messages: [{ role: 'user', text: 'Hello' }] };
+  assert.equal(validateChat({ ...base, conversation_id: C1 }), null);
+  assert.equal(validateChat({ ...base, conversationId: C1.toUpperCase() }), null);
+  assert.equal(validateChat({ ...base, conversation_id: 'bad-id' })?.[0], 'Invalid conversation_id.');
+  assert.equal(validateChat({ ...base, conversationId: '123' })?.[0], 'Invalid conversation_id.');
+  assert.equal(validateChat({ ...base, agent_id: 'personal-agent' }), null);
+  assert.equal(validateChat({ ...base, agentId: 'dua-agent' }), null);
+  assert.equal(validateChat({ ...base, agent_id: 'Invalid Agent!' })?.[0], 'Invalid agent_id.');
+  assert.equal(validateChat({ ...base, conversation_id: C1, persistence: {} })?.[0], 'Choose conversation_id or persistence, not both.');
+});
+
+test('POST /api/chat with conversation_id persists user turn before stream and assistant turn on done', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C1, title: 'Trip Planning', agent_id: 'dua-agent' });
+  const geminiRoutes = [
+    [url => url.includes(':streamGenerateContent'), () => sseResponse([
+      sse({ candidates: [{ content: { parts: [{ text: 'Paris is ' }] } }] }),
+      sse({ candidates: [{ content: { parts: [{ text: 'wonderful!' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 6 } }),
+    ])],
+  ];
+  const fetcher = router([...db.routes, ...geminiRoutes]);
+
+  const reqBody = {
+    model: 'Dua',
+    messages: [{ role: 'user', text: 'Where should we go?' }],
+    conversation_id: conv.id,
+    stream: true,
+  };
+
+  const response = await handleService(call('POST', '/api/chat', reqBody), { env, fetcher });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'text/event-stream; charset=utf-8');
+  const events = await readEvents(response);
+  assert.deepEqual(events, [
+    { type: 'text', delta: 'Paris is ' },
+    { type: 'text', delta: 'wonderful!' },
+    { type: 'done', truncated: false, usage: { inputTokens: 12, outputTokens: 6 } },
+  ]);
+
+  // Verify both user message and assistant message are saved in dua_messages
+  assert.equal(db.messages.length, 2);
+  const [userMsg, assistantMsg] = db.messages;
+  assert.equal(userMsg.conversation_id, conv.id);
+  assert.equal(userMsg.owner_id, UID);
+  assert.equal(userMsg.role, 'user');
+  assert.equal(userMsg.content, 'Where should we go?');
+  assert.equal(userMsg.agent_id, null);
+
+  assert.equal(assistantMsg.conversation_id, conv.id);
+  assert.equal(assistantMsg.owner_id, UID);
+  assert.equal(assistantMsg.role, 'assistant');
+  assert.equal(assistantMsg.content, 'Paris is wonderful!');
+  assert.equal(assistantMsg.agent_id, 'dua-agent');
+  assert.equal(assistantMsg.model, 'Dua');
+  assert.equal(assistantMsg.token_count, 18);
+  assert.deepEqual(assistantMsg.usage, { inputTokens: 12, outputTokens: 6 });
+
+  // Conversation preview and last_message_at were touched by trigger emulation
+  assert.equal(conv.last_message_preview, 'Paris is wonderful!');
+
+  // Verify GET /api/conversations/:id/messages returns both in order
+  const listRes = await handleService(call('GET', `/api/conversations/${conv.id}/messages`), { env, fetcher });
+  assert.equal(listRes.status, 200);
+  const { messages } = await listRes.json();
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0].role, 'user');
+  assert.equal(messages[0].content, 'Where should we go?');
+  assert.equal(messages[1].role, 'assistant');
+  assert.equal(messages[1].content, 'Paris is wonderful!');
+  assert.equal(messages[1].tokenCount, 18);
+});
+
+test('POST /api/chat with conversation_id persists both turns in non-streaming mode', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C2, title: 'Quick Q', agent_id: 'personal-agent' });
+  const geminiRoutes = [
+    [url => url.includes(':generateContent'), () => Response.json({
+      candidates: [{ content: { parts: [{ text: 'Direct answer.' }] }, finishReason: 'STOP' }],
+      usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 3 }
+    })],
+  ];
+  const fetcher = router([...db.routes, ...geminiRoutes]);
+
+  const reqBody = {
+    model: 'Dua',
+    messages: [{ role: 'user', text: 'Quick question?' }],
+    conversation_id: conv.id,
+    stream: false,
+  };
+
+  const response = await handleService(call('POST', '/api/chat', reqBody), { env, fetcher });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.text, 'Direct answer.');
+
+  assert.equal(db.messages.length, 2);
+  assert.equal(db.messages[0].role, 'user');
+  assert.equal(db.messages[0].content, 'Quick question?');
+  assert.equal(db.messages[1].role, 'assistant');
+  assert.equal(db.messages[1].content, 'Direct answer.');
+  assert.equal(db.messages[1].agent_id, 'personal-agent');
+  assert.equal(conv.last_message_preview, 'Direct answer.');
+});
+
+test('POST /api/chat fails fast with 404 when conversation_id does not exist or belongs to another owner', async () => {
+  const db = database();
+  db.addConversation({ id: C1, owner_id: OTHER });
+  const fetcher = router(db.routes);
+
+  const missing = await handleService(call('POST', '/api/chat', {
+    model: 'Dua',
+    messages: [{ role: 'user', text: 'Hello' }],
+    conversation_id: C2,
+  }), { env, fetcher });
+  assert.equal(missing.status, 404);
+  assert.equal((await missing.json()).error, 'That conversation was not found.');
+
+  const foreign = await handleService(call('POST', '/api/chat', {
+    model: 'Dua',
+    messages: [{ role: 'user', text: 'Hello' }],
+    conversation_id: C1,
+  }), { env, fetcher });
+  assert.equal(foreign.status, 404);
+  assert.equal(db.messages.length, 0, 'no messages written on 404');
+});
+
+test('POST /api/chat stream failure keeps user message but skips assistant message', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C1 });
+  const geminiRoutes = [
+    [url => url.includes(':streamGenerateContent'), () => new Response('invalid sse', { status: 500 })],
+  ];
+  const fetcher = router([...db.routes, ...geminiRoutes]);
+
+  const response = await handleService(call('POST', '/api/chat', {
+    model: 'Dua',
+    messages: [{ role: 'user', text: 'Will this fail?' }],
+    conversation_id: conv.id,
+    stream: true,
+  }), { env, fetcher });
+  assert.equal(response.status, 200);
+  const events = await readEvents(response);
+  assert.equal(events[0].type, 'error');
+
+  // User message was saved before the stream failed, but no assistant message
+  assert.equal(db.messages.length, 1);
+  assert.equal(db.messages[0].role, 'user');
+  assert.equal(db.messages[0].content, 'Will this fail?');
 });

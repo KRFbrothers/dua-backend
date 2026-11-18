@@ -19,8 +19,8 @@ import { resolveOwner, StorageError } from './storage.mjs';
 const noStore = (error, status) => Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
 const ok = (body, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const AGENT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const AGENT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/;
 const MAX_BODY = 16 * 1024;
 const MAX_QUERY = 100;
@@ -73,7 +73,7 @@ export function searchPattern(raw) {
 }
 
 /** Maps an upstream Supabase failure to a safe message; raw upstream text is never returned. */
-function upstreamFailure(status) {
+export function upstreamFailure(status) {
   if (status === 401) return noStore('Session expired. Sign in again.', 401);
   if (status === 403) return noStore('This account cannot use conversations.', 403);
   if (status === 409) return noStore('That conversation id is already used.', 409);
@@ -238,4 +238,117 @@ export async function handleConversations(request, { env = process.env, fetcher 
     if (error instanceof Response) return error;
     return noStore(`${FEATURE} are temporarily unavailable. Retry.`, 502);
   }
+}
+
+/**
+ * PR D: Chat persistence for relational conversations (dua_conversations + dua_messages).
+ * Verifies the owner session and conversation ownership, then writes the user's turn to dua_messages
+ * before the stream starts. Returns a commit helper that writes the assistant's turn once generation
+ * finishes cleanly. Database triggers keep last_message_at and last_message_preview up to date.
+ */
+export async function prepareConversationChat(request, data, { env = process.env, fetcher = fetch } = {}) {
+  const conversationId = (data.conversation_id || data.conversationId)?.toLowerCase();
+  if (!conversationId || !UUID.test(conversationId)) {
+    throw Object.assign(new Error('Invalid conversation_id.'), { status: 400 });
+  }
+
+  let owner;
+  try {
+    owner = await resolveOwner(request, { env, fetcher, feature: FEATURE });
+  } catch (error) {
+    throw Object.assign(
+      new Error(error instanceof StorageError ? error.message : 'Account verification is unavailable. Retry.'),
+      { status: error.status || 503 }
+    );
+  }
+
+  const base = String(env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = String(env.SUPABASE_ANON_KEY || '');
+  if (!base.startsWith('https://') || !key || key.startsWith('sb_secret_')) {
+    throw Object.assign(new Error(`${FEATURE} storage is not configured.`), { status: 503 });
+  }
+
+  const headers = { apikey: key, Authorization: `Bearer ${owner.token}`, Accept: 'application/json' };
+  const ownerFilter = `owner_id=eq.${encodeURIComponent(owner.user.id)}`;
+  const conversationFilter = `id=eq.${encodeURIComponent(conversationId)}&${ownerFilter}`;
+
+  const found = await fetcher(`${base}/rest/v1/dua_conversations?select=id,agent_id&${conversationFilter}&limit=1`, {
+    method: 'GET',
+    headers,
+    redirect: 'error',
+    signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]),
+  });
+  if (!found.ok) {
+    const failure = upstreamFailure(found.status);
+    const body = await failure.json().catch(() => ({}));
+    throw Object.assign(new Error(body.error || `${FEATURE} are temporarily unavailable. Retry.`), { status: failure.status });
+  }
+  const convRows = await found.json().catch(() => null);
+  if (!Array.isArray(convRows) || convRows.length === 0) {
+    throw Object.assign(new Error('That conversation was not found.'), { status: 404 });
+  }
+  const conv = convRows[0];
+  const agentId = data.agent_id || data.agentId || conv.agent_id || 'personal-agent';
+
+  const lastUserTurn = data.messages?.at(-1);
+  const userContent = lastUserTurn?.text || '';
+  const userRow = {
+    conversation_id: conversationId,
+    owner_id: owner.user.id,
+    agent_id: null,
+    role: 'user',
+    content: userContent,
+  };
+  const saveUserRes = await fetcher(`${base}/rest/v1/dua_messages`, {
+    method: 'POST',
+    headers: {
+      ...headers,
+      'Content-Type': 'application/json',
+      Prefer: 'return=representation',
+    },
+    body: JSON.stringify(userRow),
+    redirect: 'error',
+    signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]),
+  });
+  if (!saveUserRes.ok) {
+    const failure = upstreamFailure(saveUserRes.status);
+    const body = await failure.json().catch(() => ({}));
+    throw Object.assign(new Error(body.error || `${FEATURE} are temporarily unavailable. Retry.`), { status: failure.status });
+  }
+
+  return {
+    owner,
+    conversationId,
+    agentId,
+    async commitAssistantMessage({ text, model, tokenCount = null, usage = null }, signal) {
+      const assistantRow = {
+        conversation_id: conversationId,
+        owner_id: owner.user.id,
+        agent_id: agentId,
+        role: 'assistant',
+        content: text,
+        model: model ? String(model).slice(0, 120) : null,
+        token_count: Number.isInteger(tokenCount) && tokenCount >= 0 ? tokenCount : null,
+        usage: usage && typeof usage === 'object' ? usage : null,
+      };
+      const saveRes = await fetcher(`${base}/rest/v1/dua_messages`, {
+        method: 'POST',
+        headers: {
+          ...headers,
+          'Content-Type': 'application/json',
+          Prefer: 'return=representation',
+        },
+        body: JSON.stringify(assistantRow),
+        redirect: 'error',
+        signal: AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(15000)]),
+      });
+      if (!saveRes.ok) {
+        const failure = upstreamFailure(saveRes.status);
+        const body = await failure.json().catch(() => ({}));
+        throw Object.assign(new Error(body.error || `${FEATURE} are temporarily unavailable. Retry.`), { status: failure.status });
+      }
+      const saved = await saveRes.json().catch(() => null);
+      return Array.isArray(saved) ? saved[0] : null;
+    },
+  };
 }

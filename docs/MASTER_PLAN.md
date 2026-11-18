@@ -83,7 +83,7 @@ shipped behaviour; this file describes the target and the order of work.
   using the existing `register_*_routes(app)` pattern (see `dua_engine/orhan/routes.py`).
 - Same routes, payloads, status codes and tests. No new features.
 
-### PR C: relational conversations (this PR)
+### PR C: relational conversations (done: PR #20)
 
 - Migration `supabase/migrations/202611190001_<name>.sql` creates the clean tables `dua_conversations`
   and `dua_messages`, with RLS `owner_id = (select auth.uid())` on every policy.
@@ -101,12 +101,12 @@ shipped behaviour; this file describes the target and the order of work.
   `last_message_preview`, literal title search, limit/offset and `before` paging, hard delete with
   cascade, nullable `model`, `token_count` and `usage`. Messages are read-only until PR D.
 
-### PR D: chat persistence via `conversation_id`
+### PR D: chat persistence via `conversation_id` (this PR)
 
-- Node `/api/chat` accepts an optional `conversation_id`.
-- It saves the user message before the stream starts. When the stream completes, it saves the
-  assistant message with `agent_id`, `model` and nullable token or usage, then updates
-  `last_message_at`.
+- Node `/api/chat` accepts an optional `conversation_id` (or `conversationId`) and optional `agent_id`.
+- It saves the user message to `dua_messages` before the stream or generation starts. When the stream
+  or reply completes cleanly, it saves the assistant message with `agent_id`, `model` and nullable
+  token or usage. The database trigger updates `last_message_at` and `last_message_preview`.
 - Requests without `conversation_id` and the engine path are unchanged.
 
 ### PR E: agents and skills
