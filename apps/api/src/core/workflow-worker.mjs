@@ -3,19 +3,19 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { guardChatAccess } from './access-policy.mjs';
 import { executionDb, requireEnabled, WorkflowError, WORKFLOW_TOOLS } from './workflow-execution.mjs';
 import { createWorkflowIdentity } from './workflow-identity.mjs';
+import { engineEndpoint, engineHeaders } from './engine-client.mjs';
 
 function target(env, path) {
-  let url;
-  try { url = new URL(env.DUA_ENGINE_URL); } catch {}
-  if (!url || url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new WorkflowError('Workflow engine URL is not configured.');
-  return new URL(path, url.origin);
+  // The worker never falls back to the default engine: DUA_ENGINE_URL must be set explicitly.
+  const url = engineEndpoint(env, path, { allowDefault: false });
+  if (!url) throw new WorkflowError('Workflow engine URL is not configured.');
+  return url;
 }
 
 async function executeStep(step, previous, owner, { env, fetcher, signal }) {
   // Revalidate capabilities at dispatch, even if the client was an older version.
   if (!Array.isArray(step.allowedTools) || step.allowedTools.some(t => !WORKFLOW_TOOLS.has(t))) throw new WorkflowError('Unsupported workflow tool selection.', 422);
-  const headers = { authorization: `Bearer ${owner.token}`, 'Content-Type': 'application/json', Accept: 'text/event-stream', 'x-dua-native': '1' };
-  if (env.DUA_APP_TOKEN) headers['X-Dua-App-Token'] = env.DUA_APP_TOKEN;
+  const headers = engineHeaders(env, owner.token, { accept: 'text/event-stream', native: true });
   const capability = await fetcher(target(env, '/api/agent/capabilities'), { headers, redirect: 'error', signal });
   if (!capability.ok) throw new WorkflowError('Agent capability discovery failed. Check the engine deployment and worker owner session.');
   const catalog = await capability.json();

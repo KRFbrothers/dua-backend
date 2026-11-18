@@ -13,6 +13,21 @@ function adminKey(value) {
   return null;
 }
 
+const OWNER_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const isProduction = env => String(env?.NODE_ENV || '').trim().toLowerCase() === 'production';
+
+/**
+ * Startup owner-lock check (docs/MASTER_PLAN.md): production must name one valid owner email in
+ * DUA_ALLOWED_EMAIL. Returns a problem message (never the value itself) or null when fine.
+ */
+export function ownerLockProblem(env = process.env) {
+  if (!isProduction(env)) return null;
+  const owner = String(env.DUA_ALLOWED_EMAIL || '').trim().toLowerCase();
+  if (!owner) return 'DUA_ALLOWED_EMAIL is required when NODE_ENV=production (single-owner lock).';
+  if (!OWNER_EMAIL.test(owner)) return 'DUA_ALLOWED_EMAIL must be one valid email address when NODE_ENV=production.';
+  return null;
+}
+
 /** Optional owner policy and durable request count; this is not a token or billing cap. */
 export async function guardChatAccess(request, { env = {}, fetcher = env.fetcher || fetch, rateLimiter = chatRateLimiter } = {}) {
   const owner = String(env.allowedEmail || env.DUA_ALLOWED_EMAIL || '').trim().toLowerCase();
@@ -28,7 +43,9 @@ export async function guardChatAccess(request, { env = {}, fetcher = env.fetcher
   if (!['', 'false', '0', 'true', '1'].includes(loginValue)) return denied('Required login setup is invalid.', 503);
   if ((typeof rawMinuteLimit !== 'number' && (typeof rawMinuteLimit !== 'string' || !/^[1-9][0-9]*$/.test(rawMinuteLimit.trim()))) || !Number.isSafeInteger(minuteLimit) || minuteLimit < 1 || minuteLimit > 100000) return denied('Minute request limit setup is invalid.', 503);
   if (hasLimit && (typeof rawLimit !== 'number' && (typeof rawLimit !== 'string' || !/^[1-9][0-9]*$/.test(rawLimit.trim())) || !Number.isInteger(limit) || limit < 1 || limit > 100000)) return denied('Daily request limit setup is invalid.', 503);
-  if (owner && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(owner)) return denied('Allowed account email setup is invalid.', 503);
+  if (owner && !OWNER_EMAIL.test(owner)) return denied('Allowed account email setup is invalid.', 503);
+  // Production never runs open: without an owner email every AI request is refused (fail-closed).
+  if (!owner && isProduction(env)) return denied('Allowed account email setup is required.', 503);
   if (!requireLogin && !owner && !hasLimit && env.DUA_MINUTE_REQUEST_LIMIT === undefined) return { allowed: true, user: null, headers };
 
   const settings = { ...env, url: env.url || env.SUPABASE_URL, key: env.key || env.SUPABASE_ANON_KEY, fetcher };
