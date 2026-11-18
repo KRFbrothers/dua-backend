@@ -5,6 +5,7 @@
 
 - **Android Client (`teamily-android-ui`):** Native Android application featuring a Material 3 Forest-Slate design system, Lato typography, a 5-tab bottom navigation dock (`Chats`, `Agents`, `Discover`, `Memory`, `Artifacts`), two pinned agents (`Personal Agent` in fast `auto` mode and `Dua Agent` in `agent` mode with 5 specialized skills), and full navigation through `DuaGenAINavHost`.
 - **Cloud Backend (`dua-backend`):** Separated backend repository running a Node.js API gateway (`dua-api` on Google Cloud Run), a Python Flask/ADK AI execution engine (`dua-ai-engine` on Google Cloud Run), and a Supabase PostgreSQL database with vector memory support.
+- **Backend Roadmap:** See [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md) for the approved multi-agent backend plan, the service-role rule (user tables use only the user JWT + anon key under RLS; `service_role` only server-side for quota/Imagine RPCs after owner verification) and the PR A–E order.
 - **Quality Standard:** Every change must meet the engineering bar of a large-scale production Android company—clean architecture, zero visual or functional regressions, full accessibility support, and passing automated tests.
 
 ---

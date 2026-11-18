@@ -2,8 +2,7 @@
 // The engine plans and runs one step. This API saves the task so a closed app can resume it.
 import { readJsonLimited } from './limited-json.mjs';
 import { resolveOwner, StorageError } from './storage.mjs';
-
-const DEFAULT_ENGINE_URL = 'https://dua-ai-engine-228305912525.us-central1.run.app';
+import { engineEndpoint, engineHeaders } from './engine-client.mjs';
 
 const MAX_STEPS = 12;
 const MAX_MINUTES = 10;
@@ -335,18 +334,8 @@ function clean(value, max, { clip = false, keepLines = false } = {}) {
   return clip ? text.slice(0, max) : '';
 }
 
-function engineHeaders(env, token) {
-  const headers = { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${token}` };
-  if (env.DUA_APP_TOKEN) headers['X-Dua-App-Token'] = env.DUA_APP_TOKEN;
-  return headers;
-}
-
 function engineUrl(env, path) {
-  try {
-    const url = new URL(String(env.DUA_ENGINE_URL || DEFAULT_ENGINE_URL));
-    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) return null;
-    return new URL(path, url.origin).href;
-  } catch { return null; }
+  return engineEndpoint(env, path)?.href ?? null;
 }
 
 function upstreamFailure(status) {

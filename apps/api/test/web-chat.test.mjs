@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { handleService, DEFAULT_ENGINE_URL } from '../src/server/service-handler.mjs';
 import { mockFetch, sseResponse, sse } from './helpers.mjs';
 import { PAUSED } from '../src/core/kill-switches.mjs';
+import { DEFAULT_ENGINE_URL as SHARED_ENGINE_URL, engineEndpoint, engineHeaders } from '../src/core/engine-client.mjs';
 
 const origin='https://dua.test';
 // No access policy by default so engine-proxy tests need no Supabase fakes; quota tests add it.
@@ -170,4 +171,26 @@ test('web chat turns content strings and parts into text for the engine',async()
  const res=await run(rawReq(JSON.stringify({messages})),fetcher);
  assert.equal(res.status,200);await res.text();
  assert.deepEqual(fetcher.calls[0].body.messages,[{role:'user',text:'a'},{role:'assistant',text:'b'},{role:'user',attachments:[],text:'cd'}]);
+});
+
+test('engine client: one default origin, strict URL validation and shared headers', () => {
+ assert.equal(DEFAULT_ENGINE_URL,SHARED_ENGINE_URL);
+ assert.equal(engineEndpoint({},'/api/chat').href,SHARED_ENGINE_URL+'/api/chat');
+ assert.equal(engineEndpoint({DUA_ENGINE_URL:'https://engine.test/'},'/api/orhan/plan').href,'https://engine.test/api/orhan/plan');
+ for(const bad of ['http://engine.test','https://u:p@engine.test','https://engine.test/x','https://engine.test/?a=1','https://engine.test/#h','not a url'])
+  assert.equal(engineEndpoint({DUA_ENGINE_URL:bad},'/api/chat'),null,bad);
+ assert.equal(engineEndpoint({},'/api/chat',{allowDefault:false}),null);
+ assert.equal(engineEndpoint({DUA_ENGINE_URL:'https://engine.test'},'/api/chat',{allowDefault:false}).href,'https://engine.test/api/chat');
+ assert.deepEqual(engineHeaders({},'tok'),{'Content-Type':'application/json',Accept:'application/json',Authorization:'Bearer tok'});
+ assert.deepEqual(engineHeaders({DUA_APP_TOKEN:'app'},'tok',{accept:'text/event-stream',native:true}),{'Content-Type':'application/json',Accept:'text/event-stream',Authorization:'Bearer tok','x-dua-native':'1','X-Dua-App-Token':'app'});
+ assert.deepEqual(engineHeaders({},'tok',{accept:null}),{'Content-Type':'application/json',Authorization:'Bearer tok'});
+});
+
+test('website chat proxy sends the Android-native engine headers via the shared client', async () => {
+ const fetcher=mockFetch(sseResponse([sse({type:'done'})]));
+ await run(req(),fetcher,{DUA_APP_TOKEN:'fake-app-token'});
+ const {init}=fetcher.calls[0];
+ assert.equal(init.headers['x-dua-native'],'1');
+ assert.equal(init.headers.Accept,'text/event-stream, application/json');
+ assert.equal(init.headers['X-Dua-App-Token'],'fake-app-token');
 });

@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { makeServer, listenOptions } from '../src/server/server.mjs';
+import { ownerLockProblem, guardChatAccess } from '../src/core/access-policy.mjs';
 import { mockFetch, sseResponse, sse, env, chatRequest, readEvents } from './helpers.mjs';
 
 const geminiChunks = words => words.map((word, index) => sse({ candidates: [{ content: { parts: [{ text: word }] }, ...(index === words.length - 1 ? { finishReason: 'STOP' } : {}) }] }));
@@ -22,7 +23,7 @@ test('local development keeps loopback:3000; production/Cloud Run bind all inter
 
 test('server entry point honors container binding and serves unauthenticated configuration smoke tests', { timeout: 15000 }, async () => {
   const child = spawn(process.execPath, [fileURLToPath(new URL('../src/server/server.mjs', import.meta.url))], {
-    env: { PATH: process.env.PATH, NODE_ENV: 'production', PORT: '0', DUA_REQUIRE_LOGIN: '1', DUA_CHAT_DEADLINE_SECONDS: '780' },
+    env: { PATH: process.env.PATH, NODE_ENV: 'production', PORT: '0', DUA_REQUIRE_LOGIN: '1', DUA_CHAT_DEADLINE_SECONDS: '780', DUA_ALLOWED_EMAIL: 'owner@example.invalid' },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   const exited = once(child, 'exit');
@@ -52,6 +53,44 @@ test('server entry point honors container binding and serves unauthenticated con
     child.kill('SIGTERM');
     await exited;
   }
+});
+
+test('owner lock check: production needs one valid DUA_ALLOWED_EMAIL; development is unchanged', () => {
+  assert.equal(ownerLockProblem({}), null);
+  assert.equal(ownerLockProblem({ NODE_ENV: 'development' }), null);
+  assert.match(ownerLockProblem({ NODE_ENV: 'production' }), /DUA_ALLOWED_EMAIL is required/);
+  assert.match(ownerLockProblem({ NODE_ENV: 'production', DUA_ALLOWED_EMAIL: '   ' }), /DUA_ALLOWED_EMAIL is required/);
+  assert.match(ownerLockProblem({ NODE_ENV: 'production', DUA_ALLOWED_EMAIL: 'not-an-email' }), /valid email/);
+  assert.match(ownerLockProblem({ NODE_ENV: 'production', DUA_ALLOWED_EMAIL: 'a@b.test, c@d.test' }), /valid email/);
+  assert.equal(ownerLockProblem({ NODE_ENV: 'production', DUA_ALLOWED_EMAIL: ' Owner@Example.Invalid ' }), null);
+  // The problem message never echoes the configured value.
+  assert.doesNotMatch(ownerLockProblem({ NODE_ENV: 'production', DUA_ALLOWED_EMAIL: 'secret-value' }), /secret-value/);
+});
+
+for (const [label, email] of [['missing', undefined], ['empty', ''], ['invalid', 'not-an-email']]) {
+  test(`production server refuses to start when DUA_ALLOWED_EMAIL is ${label}`, { timeout: 15000 }, async () => {
+    const env = { PATH: process.env.PATH, NODE_ENV: 'production', PORT: '0', DUA_REQUIRE_LOGIN: '1' };
+    if (email !== undefined) env.DUA_ALLOWED_EMAIL = email;
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../src/server/server.mjs', import.meta.url))], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    const [code] = await once(child, 'exit');
+    assert.equal(code, 1);
+    assert.match(stderr, /Refusing to start: DUA_ALLOWED_EMAIL/);
+    assert.doesNotMatch(stdout, /Dua API ready/);
+  });
+}
+
+test('production access policy fails closed without an owner email (no open access)', async () => {
+  const fetcher = () => { throw new Error('no network expected'); };
+  const result = await guardChatAccess(new Request('https://dua.test/api/chat', { method: 'POST' }), { env: { NODE_ENV: 'production' }, fetcher });
+  assert.equal(result.allowed, false);
+  assert.equal(result.response.status, 503);
+  assert.match((await result.response.json()).error, /Allowed account email setup is required/);
+  // Development keeps the existing open local behaviour when nothing is configured.
+  const local = await guardChatAccess(new Request('http://localhost/api/chat', { method: 'POST' }), { env: {}, fetcher });
+  assert.equal(local.allowed, true);
 });
 
 test('local server streams chunks to the client as they are produced', async () => {

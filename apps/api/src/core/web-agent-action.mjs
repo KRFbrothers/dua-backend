@@ -1,8 +1,8 @@
 import { readJsonLimited } from './limited-json.mjs';
 import { killSwitches, maintenanceMessage, PAUSED } from './kill-switches.mjs';
+import { engineEndpoint, engineHeaders } from './engine-client.mjs';
 
 const ID = /^[A-Za-z0-9_-]{16,64}$/;
-const DEFAULT_ENGINE = 'https://dua-ai-engine-228305912525.us-central1.run.app';
 
 /** Browser-only bridge. The engine remains responsible for owner-bound, single-use execution. */
 export async function handleWebAgentAction(request, { env = process.env, fetcher = fetch, sessionHandler } = {}) {
@@ -30,12 +30,8 @@ export async function handleWebAgentAction(request, { env = process.env, fetcher
   if (!data || typeof data !== 'object' || Array.isArray(data) || typeof data.id !== 'string' || !ID.test(data.id) ||
       !['approve', 'reject'].includes(data.decision) || Object.keys(data).some(k => !['id', 'decision'].includes(k)))
     return json({ error: 'Invalid approval request.' }, 400);
-  let target;
-  try {
-    target = new URL(String(env.DUA_ENGINE_URL || DEFAULT_ENGINE));
-    if (target.protocol !== 'https:' || target.username || target.password || target.search || target.hash || !['', '/'].includes(target.pathname)) throw Error();
-    target = new URL('/api/agent/action', target.origin);
-  } catch { return json({ error: 'Agent engine is not configured.' }, 503); }
+  const target = engineEndpoint(env, '/api/agent/action');
+  if (!target) return json({ error: 'Agent engine is not configured.' }, 503);
   // Verify the browser cookie session, allowing the existing Auth handler to renew it.
   let token = Object.fromEntries((request.headers.get('cookie') || '').split(';').map(p => p.trim().split('=')).filter(p => p.length === 2)).dua_access;
   try {
@@ -60,8 +56,7 @@ export async function handleWebAgentAction(request, { env = process.env, fetcher
   // No retries: the stored action may already have executed if its response is lost.
   const unknown = () => json({ code: 'ACTION_OUTCOME_UNKNOWN', error: 'The action result could not be confirmed. Check the destination before asking the agent again.' }, 502);
   try {
-    const headers = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token };
-    if (env.DUA_APP_TOKEN) headers['X-Dua-App-Token'] = env.DUA_APP_TOKEN;
+    const headers = engineHeaders(env, token, { accept: null });
     const response = await fetcher(target, {
       method: 'POST', headers, body: JSON.stringify({ id: data.id, decision: data.decision }), redirect: 'error',
       signal: AbortSignal.any([request.signal, AbortSignal.timeout(120000)])

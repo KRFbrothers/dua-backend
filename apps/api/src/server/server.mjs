@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { MAX_REQUEST_BYTES } from '../core/attachments.mjs';
 import { handleService } from './service-handler.mjs';
+import { ownerLockProblem } from '../core/access-policy.mjs';
 
 /** Origin of the incoming request. Cloud Run reports the scheme in X-Forwarded-Proto. */
 function requestOrigin(headers) {
@@ -73,6 +74,12 @@ export function makeServer({ key = process.env.GEMINI_API_KEY, model = process.e
   });
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  // Fail fast: a production container without the single-owner lock must not start at all.
+  const problem = ownerLockProblem(process.env);
+  if (problem) {
+    console.error(`[dua-startup] Refusing to start: ${problem}`);
+    process.exit(1);
+  }
   const server = makeServer();
   const options = listenOptions();
   server.listen(options, () => console.log(`Dua API ready: http://${options.host}:${server.address().port}/api/`));

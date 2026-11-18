@@ -18,6 +18,7 @@ import { handleArtifactsMemories } from '../core/artifacts-memories.mjs';
 import { withRequestLog } from '../core/request-logging.mjs';
 import { switchResponse, killSwitches, PAUSED } from '../core/kill-switches.mjs';
 import { applyCors, corsPreflight, requestOriginAllowed } from '../core/cors.mjs';
+import { DEFAULT_ENGINE_URL, engineEndpoint, engineHeaders } from '../core/engine-client.mjs';
 
 /** DUA_CHAT_DEADLINE_SECONDS: whole-request chat deadline (default 280 s, allowed 10\u2013790 s). */
 export const chatDeadlineMs = env => envInteger(env, 'DUA_CHAT_DEADLINE_SECONDS', 280, 10, 790) * 1000;
@@ -84,7 +85,7 @@ async function routeService(request,{env=process.env,fetcher=fetch}={}) {
 // cookies the page cannot read, so dua-api forwards a same-origin browser request to dua-ai-engine
 // /api/chat with that session as the bearer token and streams the SSE reply back unbuffered.
 // DUA_ENGINE_URL overrides the engine origin; DUA_APP_TOKEN (optional) is added server-side only.
-export const DEFAULT_ENGINE_URL='https://dua-ai-engine-228305912525.us-central1.run.app';
+export { DEFAULT_ENGINE_URL };
 const WEB_CHAT_MAX_BYTES=4*1024*1024;
 const WEB_CHAT_MAX_MESSAGES=200;
 // The website sends {role,text}; accept the engine's `content` too (string or parts array).
@@ -99,11 +100,7 @@ function duaAgentSkills(data,mode){
  if(mode!=='agent'||!Array.isArray(skills)||skills.length>DUA_AGENT_SKILL_IDS.length||new Set(skills).size!==skills.length||skills.some(id=>!DUA_AGENT_SKILL_IDS.includes(id)))return null;
  return skills;
 }
-function engineUrl(env){
- try{const url=new URL(String(env.DUA_ENGINE_URL||DEFAULT_ENGINE_URL));
-  if(url.protocol!=='https:'||url.username||url.password||url.search||url.hash||!['','/'].includes(url.pathname))return null;
-  return new URL('/api/chat',url.origin);}catch{return null;}
-}
+const engineUrl=env=>engineEndpoint(env,'/api/chat');
 export async function handleWebChat(request,{env=process.env,fetcher=fetch}={}){
  if(request.method!=='POST')return noStore('Method not allowed.',405);
  const url=new URL(request.url);
@@ -136,8 +133,7 @@ export async function handleWebChat(request,{env=process.env,fetcher=fetch}={}){
  if(skills===null)return noStore('Invalid skills.',400);
  const payload={model:typeof data.model==='string'?data.model:'Dua',messages:data.messages.map(normalizeTurn),attachments:[],memory:typeof data.memory==='string'?data.memory:'',stream:true,mode};
  if(skills)payload.skills=skills;
- const headers={'Content-Type':'application/json','Accept':'text/event-stream, application/json','Authorization':'Bearer '+bearer,'x-dua-native':'1'};
- if(env.DUA_APP_TOKEN)headers['X-Dua-App-Token']=env.DUA_APP_TOKEN;
+ const headers=engineHeaders(env,bearer,{accept:'text/event-stream, application/json',native:true});
  let upstream;
  try{upstream=await fetcher(target,{method:'POST',headers,body:JSON.stringify(payload),signal:AbortSignal.any([request.signal,AbortSignal.timeout(chatDeadlineMs(env))])});}
  catch{return withAccess(noStore('Chat engine is not reachable. Try again.',502),access);}
