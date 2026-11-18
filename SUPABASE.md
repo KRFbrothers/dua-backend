@@ -46,7 +46,7 @@ After that approval, the sequence is:
 
 Use Node 24+ from `apps/api/` with `SUPABASE_URL` and `SUPABASE_ANON_KEY` (or `SUPABASE_PUBLISHABLE_KEY`) exported, then run `npm run verify:rls`. For an ignored local `.env` instead, run `node --env-file-if-exists=.env scripts/verify-rls.mjs`. Do not use a user access token, secret key or service-role key. The URL must be the project root, not `/rest/v1/`. Missing credentials print a helpful SKIP and exit 0; configuration, network and unverified access results exit 1. The script never prints keys or returned row contents.
 
-The default table list is every table created by `supabase/migrations/` (14 tables: `dua_cloud_snapshots`, `dua_daily_usage`, `dua_imagine_usage`, `dua_voice_usage`, `dua_voice_sessions`, `agent_notes`, `dua_workflow_runs`, `dua_workflow_executions`, `dua_workflow_credentials`, `dua_workflow_automation`, `dua_workflow_deliveries`, `dua_orhan_tasks`, `dua_artifacts`, `dua_memories`). Running `npm run verify:rls` with no arguments checks all of them:
+The default table list is every table created by `supabase/migrations/` (16 tables: `dua_cloud_snapshots`, `dua_daily_usage`, `dua_imagine_usage`, `dua_voice_usage`, `dua_voice_sessions`, `agent_notes`, `dua_workflow_runs`, `dua_workflow_executions`, `dua_workflow_credentials`, `dua_workflow_automation`, `dua_workflow_deliveries`, `dua_orhan_tasks`, `dua_artifacts`, `dua_memories`, `dua_conversations`, `dua_messages`). Running `npm run verify:rls` with no arguments checks all of them:
 
 ```sh
 cd apps/api
@@ -120,6 +120,17 @@ Apply `supabase/migrations/202610100001_dua_voice.sql` once, using the [CLI work
 Without this migration `/api/voice/session` refuses with a setup message and live voice never starts (hands-free mode still works).
 
 **Deploy order:** run the migration, set the `DUA_VOICE_*` variables if you want non-defaults ([docs/PROVIDERS.md](docs/PROVIDERS.md#live-voice-phase-4b) › Live voice), deploy the backend, then install the new APK.
+
+## 1e. Conversations and messages (relational chat history)
+
+Apply `supabase/migrations/202611190001_dua_conversations_messages.sql` once, using the [CLI workspace](#repository-paths-and-cli-workspace) workflow (`db push` only after explicit owner approval). It is safe to run again and does not change earlier tables. It:
+
+- creates `public.dua_conversations` (uuid id, `agent_id` default `dua-agent`, `title` default `New chat`, `pinned`, `last_message_preview`, `last_message_at`, `created_at`) and `public.dua_messages` (`role` in `user`/`assistant`/`system`/`tool`, `content` up to 200,000 characters, nullable `model`, `token_count` and `usage` jsonb);
+- turns on RLS with `owner_id = (select auth.uid())` policies. Authenticated users may select, insert and delete their conversations and update only `title` and `pinned`; messages are select and insert only and are deleted by the conversation cascade. `anon` has no access;
+- ties each message to a conversation of the same owner with a composite foreign key `(conversation_id, owner_id)`;
+- adds a `security definer` insert trigger that keeps `last_message_at` and `last_message_preview` (first 200 characters) current. Clients cannot execute it directly.
+
+`dua-api` reads and writes these tables only with the signed-in owner's token and the anon key (`/api/conversations`, see [API_CONTRACT.md](API_CONTRACT.md)). The `service_role` table grant exists only for the scheduled backup job; the API never uses it here. Nothing is copied from `dua_cloud_snapshots`, and `/api/cloud` is unchanged.
 
 ## 2. Configure the shared backend
 
