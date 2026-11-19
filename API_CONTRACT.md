@@ -68,7 +68,9 @@ Local default: `http://127.0.0.1:3000`. JSON body unless a row says otherwise.
 | Method and path | Request | Response |
 |---|---|---|
 | `GET /api/account/session` | none | `{ "configured": true, "user": {} }` or `{ "configured": false, "user": null }` |
-| `GET /api/account/features` | none | `{ "passwordReset": false, "emailAuth": true, "accountDeletion": false }` |
+| `GET /api/account/features` | none | `{ "passwordReset": true, "emailAuth": true, "accountDeletion": false }` |
+| `POST /api/auth/reset-password` | `{ "email": "", "redirectTo": "" }` (`redirectTo` optional) | `{ "ok": true, "message": "Password reset email sent." }` |
+| `POST /api/account/reset-password` | `{ "email": "", "redirectTo": "" }` (`redirectTo` optional) | `{ "ok": true, "message": "Password reset email sent." }` |
 | `POST /api/account/google-token` | `{ "idToken": "", "nonce": "" }` nonce optional | session JSON above. Android, or a browser origin listed in `WEB_ORIGINS` |
 | `POST /api/account/email-login` | `{ "email": "", "password": "" }` | session JSON |
 | `POST /api/account/email-signup` | `{ "email": "", "password": "" }` | session JSON, or `{ "configured": true, "confirmationRequired": true, "message": "..." }` |
@@ -520,6 +522,14 @@ Local process: `python app.py` from `apps/ai-engine`, behind `wsgi.py` in produc
 `POST /chat` is the old one-turn route. Body `{ "message": "" }`. Response `{ "reply": "" }`.
 
 `POST /api/title` body `{ "user": "", "reply": "" }`. Response `{ "title": "" }`.
+
+### Semantic Cost Router (Phase 6A)
+
+Before model execution, the engine classifies request complexity via `classify_complexity` and routes to the appropriate model tier:
+- **Fast / Low-Cost Tier (`Gemini Flash`)**: Title generation, `@mention` routing, short casual Q&A, and memory fact extraction.
+- **Frontier Reasoning Tier (`Gemini Pro` / `Claude`)**: Multi-step `mode: "agent"` tool loops, coding/PR tasks, Studio artifact revisions (`/revise`), and complex analysis.
+
+The chosen model is recorded in `dua_messages.model`, and `AGENT_DAILY_TOKEN_LIMIT` is strictly enforced.
 
 ### Agent actions, notes, documents
 

@@ -103,7 +103,7 @@ test('the owner keeps refresh, cloud read/write; session, features and logout st
   assert.equal((await session.json()).user.email, 'someone@else.com');
 
   const features = await call('/api/account/features', { token: null }, mockFetch());
-  assert.deepEqual(await features.json(), { passwordReset: false, emailAuth: true, accountDeletion: false });
+  assert.deepEqual(await features.json(), { passwordReset: true, emailAuth: true, accountDeletion: false });
 
   const logout = await call('/api/account/logout', { method: 'POST', body: {} }, mockFetch(new Response(null, { status: 204 })));
   assert.equal(logout.status, 200);
@@ -120,12 +120,77 @@ test('without DUA_ALLOWED_EMAIL any signed-in account may use cloud; a malformed
 });
 
 test('legacy sign-in/signup and recovery routes remain unserved', async () => {
-  for (const route of ['signin', 'signup', 'reset-password', 'verify-recovery']) {
+  for (const route of ['signin', 'signup', 'verify-recovery']) {
     const fetcher = mockFetch();
     const response = await call('/api/account/' + route, { method: 'POST', body: { email: 'fareed@example.com', password: 'secret-password', token: '123456' }, token: null }, fetcher);
     assert.equal(response.status, 404, route);
     assert.equal(fetcher.calls.length, 0, route + ' must not reach Supabase');
   }
+});
+
+test('password reset sends recovery email for owner and validates redirect URL', async () => {
+  const envWithOrigins = { ...serviceEnv, WEB_ORIGINS: 'https://ui.example.com,https://app.example.com' };
+
+  // 1. Successful reset with no redirect
+  const okFetcher = mockFetch(Response.json({}));
+  const ok = await call('/api/auth/reset-password', {
+    method: 'POST', body: { email: 'fareed@example.com' }, token: null, env: envWithOrigins
+  }, okFetcher);
+  assert.equal(ok.status, 200);
+  assert.deepEqual(await ok.json(), { ok: true, message: 'Password reset email sent.' });
+  assert.equal(okFetcher.calls.length, 1);
+  assert.match(okFetcher.calls[0].url, /\/auth\/v1\/recover$/);
+  assert.equal(okFetcher.calls[0].body.email, 'fareed@example.com');
+
+  // 2. Also works on /api/account/reset-password alias
+  const aliasFetcher = mockFetch(Response.json({}));
+  const aliasRes = await call('/api/account/reset-password', {
+    method: 'POST', body: { email: 'fareed@example.com' }, token: null, env: envWithOrigins
+  }, aliasFetcher);
+  assert.equal(aliasRes.status, 200);
+
+  // 3. Allowed redirect URL is passed through
+  const redirectFetcher = mockFetch(Response.json({}));
+  const redirectRes = await call('/api/auth/reset-password', {
+    method: 'POST', body: { email: 'fareed@example.com', redirectTo: 'https://ui.example.com/reset-callback' }, token: null, env: envWithOrigins
+  }, redirectFetcher);
+  assert.equal(redirectRes.status, 200);
+  assert.match(redirectFetcher.calls[0].url, /\/auth\/v1\/recover\?redirect_to=https%3A%2F%2Fui\.example\.com%2Freset-callback$/);
+  assert.equal(redirectFetcher.calls[0].body.redirect_to, 'https://ui.example.com/reset-callback');
+
+  // 4. Disallowed open-redirect URL is rejected without calling Supabase
+  const phishingFetcher = mockFetch();
+  const phishing = await call('/api/auth/reset-password', {
+    method: 'POST', body: { email: 'fareed@example.com', redirectTo: 'https://evil-phishing.com/steal-token' }, token: null, env: envWithOrigins
+  }, phishingFetcher);
+  assert.equal(phishing.status, 400);
+  assert.match((await phishing.json()).error, /Redirect URL is not allowed/);
+  assert.equal(phishingFetcher.calls.length, 0);
+
+  // 5. Malformed redirect URL is rejected
+  const malformedFetcher = mockFetch();
+  const malformed = await call('/api/auth/reset-password', {
+    method: 'POST', body: { email: 'fareed@example.com', redirectTo: 'not-a-valid-url' }, token: null, env: envWithOrigins
+  }, malformedFetcher);
+  assert.equal(malformed.status, 400);
+  assert.match((await malformed.json()).error, /Invalid redirect URL/);
+  assert.equal(malformedFetcher.calls.length, 0);
+
+  // 6. Non-owner email is rejected 403 without reaching Supabase
+  const strangerFetcher = mockFetch();
+  const stranger = await call('/api/auth/reset-password', {
+    method: 'POST', body: { email: 'attacker@evil.com' }, token: null, env: envWithOrigins
+  }, strangerFetcher);
+  assert.equal(stranger.status, 403);
+  assert.match((await stranger.json()).error, /Only the configured personal account/);
+  assert.equal(strangerFetcher.calls.length, 0);
+
+  // 7. Invalid email format is rejected 400
+  const invalidEmail = await call('/api/auth/reset-password', {
+    method: 'POST', body: { email: 'not-an-email' }, token: null, env: envWithOrigins
+  }, mockFetch());
+  assert.equal(invalidEmail.status, 400);
+  assert.match((await invalidEmail.json()).error, /Enter a valid email address/);
 });
 
 test('Google sign-in returns the https profile photo and drops unsafe ones', async () => {

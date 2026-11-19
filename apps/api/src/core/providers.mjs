@@ -235,6 +235,7 @@ export async function handleChat(request, { env = process.env, fetcher = fetch, 
     return json({ geminiConfigured: providers[0].configured, model: providers[0].model, providers, web, streaming: true, personalization: { personality: true }, files: filesConfiguration(env), context, imagine: pausedImagine(publicImagineConfiguration(env), switches), voice: pausedVoice(voiceConfiguration(env), switches), switches,
       history: { rename: true, pin: true, delete: Boolean(env.DUA_ALLOWED_EMAIL?.trim() && env.SUPABASE_URL && env.SUPABASE_ANON_KEY), persistReplies: Boolean(env.DUA_ALLOWED_EMAIL?.trim() && env.SUPABASE_URL && env.SUPABASE_ANON_KEY) },
       realtime: { enabled: Boolean(env.SUPABASE_URL && env.SUPABASE_ANON_KEY), tables: ['dua_conversations', 'dua_messages', 'dua_agents', 'dua_artifacts', 'dua_artifact_versions'] },
+      passwordReset: true,
       code: codeExecutionConfiguration(env, definitions, configured), build: buildConfiguration(env, configured), projects: { enabled: Boolean(env.DUA_ALLOWED_EMAIL?.trim() && env.SUPABASE_URL && env.SUPABASE_ANON_KEY), tasks: true, dueDates: true, memory: true } });
   }
   if (url.pathname !== '/api/chat' || request.method !== 'POST') return json({ error: 'Method not allowed.' }, 405);

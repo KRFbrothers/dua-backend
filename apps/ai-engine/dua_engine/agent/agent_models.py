@@ -12,6 +12,82 @@ import re
 ROLES = {'controller', 'helper', 'merger'}
 PROVIDERS = ('openai/', 'anthropic/', 'ollama/', 'ollama_chat/', 'vllm/', 'openrouter/')
 
+TIER_FAST = "fast"
+TIER_FRONTIER = "frontier"
+
+DEFAULT_FAST_MODEL = "gemini-3.8-flash"
+DEFAULT_FRONTIER_MODEL = "gemini-4-argon"
+
+_FAST_TASKS = {"title", "mention", "memory_extraction", "tagging", "summary_short"}
+_FRONTIER_TASKS = {"revise", "coding", "agent_loop", "pr_review", "deep_analysis"}
+
+_FRONTIER_KEYWORDS = re.compile(
+    r"\b(pull request|create pr|git diff|refactor architecture|debug|traceback|"
+    r"deep analysis|comprehensive report|prove theorem|formal proof|complex math|"
+    r"/revise|revise artifact|codebase review)\b",
+    re.IGNORECASE
+)
+
+
+def get_fast_model():
+    return os.environ.get("FAST_MODEL") or os.environ.get("VERTEX_MODEL") or DEFAULT_FAST_MODEL
+
+
+def get_frontier_model():
+    return os.environ.get("FRONTIER_MODEL") or os.environ.get("AGENT_MODEL") or DEFAULT_FRONTIER_MODEL
+
+
+def classify_complexity(data=None, mode="auto", text="", task=None):
+    """Classify request complexity into 'fast' or 'frontier' tier.
+
+    Fast/Low-Cost Tier (Gemini Flash): Title generation, @mention routing,
+    short casual Q&A, memory fact extraction.
+    Frontier Reasoning Tier (Gemini Pro/Claude): Multi-step mode: 'agent'
+    tool loops, coding/PR tasks, Studio artifact revisions (/revise),
+    and complex analysis.
+    """
+    if data and isinstance(data, dict):
+        if not mode or mode == "auto":
+            mode = data.get("mode", mode)
+        if not task:
+            task = data.get("task")
+        if not text:
+            msgs = data.get("messages")
+            if isinstance(msgs, list) and msgs:
+                last_msg = msgs[-1]
+                if isinstance(last_msg, dict):
+                    text = last_msg.get("text", "")
+
+    task_str = str(task or "").strip().lower()
+    if task_str in _FAST_TASKS:
+        return TIER_FAST
+    if task_str in _FRONTIER_TASKS:
+        return TIER_FRONTIER
+
+    if task_str == "revise" or (text and "/revise" in text):
+        return TIER_FRONTIER
+
+    if mode in ("agent", "build", "reasoning"):
+        return TIER_FRONTIER
+
+    if text:
+        if _FRONTIER_KEYWORDS.search(text):
+            return TIER_FRONTIER
+        if len(text.split()) > 400:
+            return TIER_FRONTIER
+
+    return TIER_FAST
+
+
+def select_semantic_model(data=None, mode="auto", text="", task=None, default_model=None):
+    """Return tuple (model_name, tier) based on semantic complexity."""
+    tier = classify_complexity(data=data, mode=mode, text=text, task=task)
+    if default_model:
+        return default_model, tier
+    if tier == TIER_FRONTIER:
+        return get_frontier_model(), tier
+    return get_fast_model(), tier
+
 
 def routes():
     raw = os.environ.get('ADK_MODELS_JSON', '').strip()

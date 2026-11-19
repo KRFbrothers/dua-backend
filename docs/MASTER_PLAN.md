@@ -183,6 +183,21 @@ shipped behaviour; this file describes the target and the order of work.
   - Graceful fallback when FCM is not configured in local testing.
 - **Tests**: comprehensive unit tests in `notifications.test.mjs` (8/8 passing) and verify-rls (24 tables).
 
+### PR J: Context-Aware Semantic Cost Router & Password Reset (completed)
+
+- **Phase 6A: Context-Aware Semantic Cost Router** (`apps/ai-engine/dua_engine/agent/agent_models.py`):
+  - Added `classify_complexity(data, mode, text, task)` classifying tasks into `fast` and `frontier` tiers:
+    - **Fast/Low-Cost Tier (`Gemini Flash`)**: Title generation, `@mention` routing, short casual Q&A, memory fact extraction.
+    - **Frontier Reasoning Tier (`Gemini Pro` / `Claude`)**: Multi-step `mode: "agent"` tool loops, coding/PR tasks, Studio artifact revisions (`/revise`), complex analysis.
+  - Added `select_semantic_model(data, mode, text, task, default_model)` returning `(model_name, tier)`.
+  - Preserved `AGENT_DAILY_TOKEN_LIMIT` enforcement and recording `model` in `dua_messages`.
+- **Phase 6B: Password Reset & Feature Polish** (`apps/api`):
+  - Added `POST /api/auth/reset-password` and alias `POST /api/account/reset-password` invoking Supabase GoTrue Auth `POST /auth/v1/recover`.
+  - Enforced single-user `DUA_ALLOWED_EMAIL` owner lock (rejects non-owner emails with 403).
+  - Enforced redirect URL origin check against `WEB_ORIGINS` allowlist and server origin to strictly prevent open-redirect phishing.
+  - Flipped `passwordReset: true` in `GET /api/config` and `GET /api/account/features`.
+- **Tests**: 11 new tests in `test_semantic_router.py` (all passing) and comprehensive password reset tests in `account.test.mjs` (all 452 Node tests passing).
+
 ## 4. Out of scope until separately approved
 
 - Running `db push` or any deploy.
