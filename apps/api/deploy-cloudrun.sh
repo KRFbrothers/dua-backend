@@ -92,6 +92,11 @@ for flag in "${feature_flags[@]}"; do
   fi
 done
 
+# Keep starter skills synced from the engine catalog so the container has access in isolation.
+if [[ -f "$web_dir/../ai-engine/dua_engine/agent/dua_agent_prompts.json" ]]; then
+  cp "$web_dir/../ai-engine/dua_engine/agent/dua_agent_prompts.json" "$web_dir/src/core/dua_agent_prompts.json"
+fi
+
 # Build the Dua AI website (apps/web/) into apps/api/site so dua-api serves it at /. The folder is
 # always recreated, so the image never carries a stale site; without apps/web/ the API deploys alone.
 site_src="${DUA_WEBSITE_DIR:-$web_dir/../web}"

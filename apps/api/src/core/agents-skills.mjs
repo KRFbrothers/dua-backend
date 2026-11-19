@@ -48,13 +48,21 @@ export const OFFICIAL_AGENTS = Object.freeze([
 let STARTER_SKILLS = null;
 export function getStarterSkills() {
   if (!STARTER_SKILLS) {
-    try {
-      const url = new URL('../../../ai-engine/dua_engine/agent/dua_agent_prompts.json', import.meta.url);
-      const parsed = JSON.parse(readFileSync(url, 'utf8'));
-      STARTER_SKILLS = Array.isArray(parsed?.skills) ? parsed.skills : [];
-    } catch {
-      STARTER_SKILLS = [];
+    for (const relative of [
+      './dua_agent_prompts.json',
+      '../../../ai-engine/dua_engine/agent/dua_agent_prompts.json',
+      '../../ai-engine/dua_engine/agent/dua_agent_prompts.json',
+    ]) {
+      try {
+        const url = new URL(relative, import.meta.url);
+        const parsed = JSON.parse(readFileSync(url, 'utf8'));
+        if (Array.isArray(parsed?.skills) && parsed.skills.length > 0) {
+          STARTER_SKILLS = parsed.skills;
+          break;
+        }
+      } catch {}
     }
+    if (!STARTER_SKILLS) STARTER_SKILLS = [];
   }
   return STARTER_SKILLS;
 }
