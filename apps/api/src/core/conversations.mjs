@@ -16,6 +16,7 @@
 import { readJsonLimited } from './limited-json.mjs';
 import { resolveOwner, StorageError } from './storage.mjs';
 import { loadPrivacySafeMemories, formatMemories, triggerMemoryAutoExtraction } from './artifacts-memories.mjs';
+import { OFFICIAL_AGENTS } from './agents-skills.mjs';
 
 const noStore = (error, status) => Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
 const ok = (body, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -113,12 +114,17 @@ function conversationRow(data, ownerId) {
 export async function handleConversations(request, { env = process.env, fetcher = fetch } = {}) {
   const url = new URL(request.url);
   const parts = url.pathname.split('/').filter(Boolean);
-  if (parts[0] !== 'api' || parts[1] !== 'conversations' || parts.length > 4) return noStore('Not found.', 404);
+  if (parts[0] !== 'api' || parts[1] !== 'conversations' || parts.length > 5) return noStore('Not found.', 404);
   const id = parts[2] || '';
   const action = parts[3] || '';
+  const subId = parts[4] || '';
   if (parts.length >= 3 && !UUID.test(id)) return noStore('Not found.', 404);
-  if (parts.length === 4 && !['messages', 'pin'].includes(action)) return noStore('Not found.', 404);
-  const allowed = parts.length === 2 ? ['GET', 'POST'] : parts.length === 3 ? ['DELETE'] : action === 'messages' ? ['GET'] : ['PUT'];
+  if (parts.length === 4 && !['messages', 'pin', 'agents'].includes(action)) return noStore('Not found.', 404);
+  if (parts.length === 5 && (action !== 'agents' || !AGENT_ID.test(subId))) return noStore('Not found.', 404);
+  const allowed = parts.length === 2 ? ['GET', 'POST'] :
+    parts.length === 3 ? ['DELETE'] :
+    parts.length === 4 ? (action === 'messages' ? ['GET'] : action === 'pin' ? ['PUT'] : ['GET', 'POST']) :
+    ['DELETE'];
   if (!allowed.includes(request.method)) return noStore('Method not allowed.', 405);
 
   let owner;
@@ -211,6 +217,74 @@ export async function handleConversations(request, { env = process.env, fetcher 
       return ok({ messages: rows.slice(0, limit).reverse().map(presentMessage), hasMore: rows.length > limit });
     }
 
+    if (action === 'agents') {
+      const found = await db('dua_conversations', `?select=id&${conversationFilter}&limit=1`, { method: 'GET' });
+      if (!found.ok) return upstreamFailure(found.status);
+      const conversation = await rowsOf(found);
+      if (!conversation) return noStore(`${FEATURE} returned an invalid list.`, 502);
+      if (!conversation.length) return noStore('That conversation was not found.', 404);
+
+      if (parts.length === 4 && request.method === 'GET') {
+        const response = await db('dua_conversation_agents',
+          `?select=conversation_id,agent_id,added_at&conversation_id=eq.${encodeURIComponent(id.toLowerCase())}&${ownerFilter}&order=added_at.asc`,
+          { method: 'GET' });
+        if (!response.ok) return upstreamFailure(response.status);
+        const rows = await rowsOf(response);
+        if (!rows) return noStore(`${FEATURE} returned an invalid list.`, 502);
+        return ok({ agents: rows.map(r => ({ conversationId: r.conversation_id, agentId: r.agent_id, addedAt: r.added_at })) });
+      }
+
+      if (parts.length === 4 && request.method === 'POST') {
+        const { data, response: invalid } = await readBody(request);
+        if (invalid) return invalid;
+        if (!isObject(data) || typeof data.agentId !== 'string' || !AGENT_ID.test(data.agentId)) {
+          return noStore('Invalid agentId.', 400);
+        }
+        const agentId = data.agentId;
+        const isOfficial = OFFICIAL_AGENTS.some(a => a.id === agentId);
+        if (!isOfficial) {
+          const agentCheck = await db('dua_agents', `?select=id&id=eq.${encodeURIComponent(agentId)}&${ownerFilter}&limit=1`, { method: 'GET' });
+          if (!agentCheck.ok) return upstreamFailure(agentCheck.status);
+          const checked = await rowsOf(agentCheck);
+          if (!checked || !checked.length) return noStore('Agent not found.', 404);
+        }
+
+        const insertRow = {
+          conversation_id: id.toLowerCase(),
+          agent_id: agentId,
+          owner_id: owner.user.id,
+        };
+        const response = await db('dua_conversation_agents', '?on_conflict=conversation_id,agent_id', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Prefer: 'resolution=ignore-duplicates,return=representation' },
+          body: JSON.stringify(insertRow),
+        });
+        if (!response.ok) return upstreamFailure(response.status);
+        let stored = (await rowsOf(response))?.[0];
+        if (!stored) {
+          const existing = await db('dua_conversation_agents',
+            `?select=conversation_id,agent_id,added_at&conversation_id=eq.${encodeURIComponent(id.toLowerCase())}&agent_id=eq.${encodeURIComponent(agentId)}&${ownerFilter}&limit=1`,
+            { method: 'GET' });
+          if (existing.ok) stored = (await rowsOf(existing))?.[0];
+        }
+        if (!stored) return noStore(`${FEATURE} did not confirm the save.`, 502);
+        return ok({ agent: { conversationId: stored.conversation_id, agentId: stored.agent_id, addedAt: stored.added_at } }, 201);
+      }
+
+      if (parts.length === 5 && request.method === 'DELETE') {
+        const response = await db('dua_conversation_agents',
+          `?conversation_id=eq.${encodeURIComponent(id.toLowerCase())}&agent_id=eq.${encodeURIComponent(subId)}&${ownerFilter}`,
+          {
+            method: 'DELETE',
+            headers: { Prefer: 'return=representation' },
+          });
+        if (!response.ok) return upstreamFailure(response.status);
+        const removed = await rowsOf(response);
+        if (!removed || removed.length === 0) return noStore('That agent was not in this conversation.', 404);
+        return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
+      }
+    }
+
     if (action === 'pin') {
       const { data, response: invalid } = await readBody(request);
       if (invalid) return invalid;
@@ -242,10 +316,79 @@ export async function handleConversations(request, { env = process.env, fetcher 
 }
 
 /**
- * PR D: Chat persistence for relational conversations (dua_conversations + dua_messages).
+ * Phase 4A: Parses @mention tags from user turn and matches against candidate agents.
+ * E.g. "@FrontendDeveloper check this and @devops-automator deploy"
+ * Matches against either agent id or agent name case-insensitively, ignoring hyphens/spaces.
+ */
+export function parseMentions(text, candidates = []) {
+  if (typeof text !== 'string' || !text.includes('@')) return [];
+  const regex = /(?:^|[\s,.;:!?()[\]{}'"`])@([a-zA-Z0-9][a-zA-Z0-9_-]*)/g;
+  const rawTags = [];
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    rawTags.push(match[1]);
+  }
+  if (rawTags.length === 0) return [];
+
+  const normalize = str => (str || '').toLowerCase().replace(/[-_\s]/g, '');
+  const matched = [];
+  const seen = new Set();
+
+  for (const tag of rawTags) {
+    const normTag = normalize(tag);
+    const candidate = candidates.find(c =>
+      normalize(c.id) === normTag || normalize(c.name) === normTag
+    );
+    if (candidate && !seen.has(candidate.id)) {
+      seen.add(candidate.id);
+      matched.push(candidate);
+    }
+  }
+  return matched;
+}
+
+/**
+ * Phase 4A: Loads all agents available to this owner (official + custom from dua_agents).
+ */
+export async function loadAvailableAgents({ base, headers, ownerId, fetcher = fetch, signal = null }) {
+  const official = [
+    { id: 'personal-agent', name: 'Personal Agent', mode: 'auto', systemPrompt: '' },
+    { id: 'dua-agent', name: 'Dua Agent', mode: 'agent', systemPrompt: '' },
+  ];
+  if (!base || !headers || !ownerId) return official;
+
+  try {
+    const res = await fetcher(`${base}/rest/v1/dua_agents?select=id,name,mode,system_prompt&owner_id=eq.${encodeURIComponent(ownerId)}`, {
+      method: 'GET',
+      headers,
+      redirect: 'error',
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return official;
+    const rows = await res.json().catch(() => []);
+    if (!Array.isArray(rows)) return official;
+    const custom = rows.map(r => ({
+      id: r.id,
+      name: r.name,
+      mode: r.mode || 'auto',
+      systemPrompt: r.system_prompt || '',
+    }));
+    const merged = [...official];
+    for (const c of custom) {
+      const idx = merged.findIndex(o => o.id === c.id);
+      if (idx >= 0) merged[idx] = { ...merged[idx], ...c };
+      else merged.push(c);
+    }
+    return merged;
+  } catch {
+    return official;
+  }
+}
+
+/**
+ * PR D + PR G: Chat persistence and multi-agent group chat orchestration for relational conversations.
  * Verifies the owner session and conversation ownership, then writes the user's turn to dua_messages
- * before the stream starts. Returns a commit helper that writes the assistant's turn once generation
- * finishes cleanly. Database triggers keep last_message_at and last_message_preview up to date.
+ * before the stream starts. Resolves target agents (@mention or group members) and returns a commit helper.
  */
 export async function prepareConversationChat(request, data, { env = process.env, fetcher = fetch } = {}) {
   const conversationId = (data.conversation_id || data.conversationId)?.toLowerCase();
@@ -289,7 +432,7 @@ export async function prepareConversationChat(request, data, { env = process.env
     throw Object.assign(new Error('That conversation was not found.'), { status: 404 });
   }
   const conv = convRows[0];
-  const agentId = data.agent_id || data.agentId || conv.agent_id || 'personal-agent';
+  const primaryFallbackAgentId = data.agent_id || data.agentId || conv.agent_id || 'personal-agent';
 
   // Phase 3: inject privacy-safe memories into data.memory for context.
   // Loads 'global' + 'group:<conversationId>' memories; never leaks other threads.
@@ -306,6 +449,46 @@ export async function prepareConversationChat(request, data, { env = process.env
 
   const lastUserTurn = data.messages?.at(-1);
   const userContent = lastUserTurn?.text || '';
+
+  // Phase 4A: Multi-Agent Group Chat — resolve assigned group agents & candidate agents
+  let assignedAgentIds = [];
+  try {
+    const groupRes = await fetcher(`${base}/rest/v1/dua_conversation_agents?select=agent_id&${conversationFilter}&order=added_at.asc`, {
+      method: 'GET',
+      headers,
+      redirect: 'error',
+      signal: AbortSignal.any([request.signal, AbortSignal.timeout(5000)]),
+    });
+    if (groupRes.ok) {
+      const gRows = await groupRes.json().catch(() => []);
+      if (Array.isArray(gRows)) assignedAgentIds = gRows.map(r => r.agent_id);
+    }
+  } catch {}
+
+  const availableAgents = await loadAvailableAgents({ base, headers, ownerId: owner.user.id, fetcher, signal: request.signal });
+
+  // Parse @mentions
+  const mentionedAgents = parseMentions(userContent, availableAgents);
+
+  let targetAgents = [];
+  if (mentionedAgents.length > 0) {
+    targetAgents = mentionedAgents;
+  } else if (assignedAgentIds.length > 1) {
+    // Multi-agent group thread without explicit @mention:
+    // Dispatch assigned agents (up to 3)
+    targetAgents = assignedAgentIds
+      .map(id => availableAgents.find(a => a.id === id) || { id, name: id, systemPrompt: '' })
+      .slice(0, 3);
+  } else if (assignedAgentIds.length === 1) {
+    const id = assignedAgentIds[0];
+    targetAgents = [availableAgents.find(a => a.id === id) || { id, name: id, systemPrompt: '' }];
+  } else {
+    targetAgents = [availableAgents.find(a => a.id === primaryFallbackAgentId) || { id: primaryFallbackAgentId, name: primaryFallbackAgentId, systemPrompt: '' }];
+  }
+
+  const isMultiAgent = targetAgents.length > 1;
+  const agentId = targetAgents[0]?.id || primaryFallbackAgentId;
+
   const userRow = {
     conversation_id: conversationId,
     owner_id: owner.user.id,
@@ -334,11 +517,14 @@ export async function prepareConversationChat(request, data, { env = process.env
     owner,
     conversationId,
     agentId,
-    async commitAssistantMessage({ text, model, tokenCount = null, usage = null }, signal) {
+    targetAgents,
+    isMultiAgent,
+    async commitAssistantMessage({ text, model, tokenCount = null, usage = null, agentId: messageAgentId = null }, signal) {
+      const rowAgentId = messageAgentId || agentId;
       const assistantRow = {
         conversation_id: conversationId,
         owner_id: owner.user.id,
-        agent_id: agentId,
+        agent_id: rowAgentId,
         role: 'assistant',
         content: text,
         model: model ? String(model).slice(0, 120) : null,

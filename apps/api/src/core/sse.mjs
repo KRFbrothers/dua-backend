@@ -38,7 +38,7 @@ export const SSE_HEADERS = Object.freeze({
   'X-Accel-Buffering': 'no',
   'X-Content-Type-Options': 'nosniff'
 });
-const TYPES = new Set(['thinking', 'text', 'sources', 'notice', 'files', 'context', 'code', 'build', 'proposal', 'saved', 'done', 'error']);
+const TYPES = new Set(['thinking', 'text', 'sources', 'notice', 'files', 'context', 'code', 'build', 'proposal', 'saved', 'done', 'error', 'agent_done']);
 
 export function formatEvent(event) {
   if (!event || !TYPES.has(event.type)) throw new TypeError('Unknown stream event type.');

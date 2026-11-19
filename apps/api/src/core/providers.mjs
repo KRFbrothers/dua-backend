@@ -283,6 +283,85 @@ async function generateValidatedChat(request, data, { env, fetcher, pageReader, 
     // Flush headers and keep the socket alive BEFORE web/file preparation or provider headers arrive.
     // The signal combines the service deadline with client cancellation, including these initial waits.
     return eventStreamResponse(async (send, streamSignal) => {
+      if (conversationChat?.isMultiAgent) {
+        // Phase 4A: Multi-Agent Group Chat parallel streaming
+        const agents = conversationChat.targetAgents;
+        await Promise.allSettled(agents.map(async agent => {
+          let agentText = '';
+          let agentFailed = false;
+          let agentDone = null;
+
+          const agentData = {
+            ...data,
+            personality: [agent.systemPrompt, data.personality].filter(Boolean).join('\n\n') || undefined,
+          };
+
+          const agentSend = event => {
+            if (event.type === 'text') agentText += event.delta;
+            if (event.type === 'error') agentFailed = true;
+            if (event.type === 'done') {
+              agentDone = event;
+              return;
+            }
+            send({
+              ...event,
+              agentId: agent.id,
+              agentName: agent.name,
+            });
+          };
+
+          const agentReply = (sig, sEvent) => generateChatReply(request, agentData, provider, parts, { env, fetcher, pageReader, model, reasoning, search, signal: sig, sendEvent: sEvent });
+
+          const failed = await agentReply(streamSignal, agentSend);
+          if (failed) {
+            const body = await failed.json().catch(() => ({}));
+            send({
+              type: 'error',
+              message: body.error || `${agent.name} failed to reply.`,
+              status: failed.status,
+              agentId: agent.id,
+              agentName: agent.name,
+            });
+            return;
+          }
+
+          if (agentDone && !agentFailed && agentText.trim()) {
+            try {
+              const usage = agentDone.usage;
+              const tokenCount = Number.isInteger(usage?.totalTokens)
+                ? usage.totalTokens
+                : ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) || null);
+              await conversationChat.commitAssistantMessage({
+                text: agentText,
+                agentId: agent.id,
+                model: data.model,
+                tokenCount,
+                usage: (usage && typeof usage === 'object') ? usage : null,
+              }, streamSignal);
+            } catch (err) {
+              send({
+                type: 'error',
+                message: err.message || `Saving ${agent.name} reply failed.`,
+                status: err.status || 502,
+                agentId: agent.id,
+                agentName: agent.name,
+              });
+              return;
+            }
+          }
+
+          send({
+            type: 'agent_done',
+            agentId: agent.id,
+            agentName: agent.name,
+            usage: agentDone?.usage || null,
+          });
+        }));
+
+        send({ type: 'done' });
+        return;
+      }
+
       let assistantText = '';
       let streamFailed = false;
       let doneEvent = null;
@@ -313,6 +392,7 @@ async function generateValidatedChat(request, data, { env, fetcher, pageReader, 
             : ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) || null);
           await conversationChat.commitAssistantMessage({
             text: assistantText,
+            agentId: conversationChat.agentId,
             model: data.model,
             tokenCount,
             usage: (usage && typeof usage === 'object') ? usage : null,
@@ -330,6 +410,46 @@ async function generateValidatedChat(request, data, { env, fetcher, pageReader, 
   const res = await reply(request.signal);
   if (conversationChat && res.ok) {
     const body = await res.json();
+    if (conversationChat.isMultiAgent) {
+      const remainingAgents = conversationChat.targetAgents.slice(1);
+      const usage = body.usage;
+      const tokenCount = Number.isInteger(usage?.totalTokens)
+        ? usage.totalTokens
+        : ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) || null);
+      await conversationChat.commitAssistantMessage({
+        text: body.text,
+        agentId: conversationChat.targetAgents[0].id,
+        model: data.model,
+        tokenCount,
+        usage: (usage && typeof usage === 'object') ? usage : null,
+      }, request.signal);
+
+      const replies = [{ agentId: conversationChat.targetAgents[0].id, agentName: conversationChat.targetAgents[0].name, text: body.text, usage }];
+
+      await Promise.allSettled(remainingAgents.map(async agent => {
+        const agentData = {
+          ...data,
+          personality: [agent.systemPrompt, data.personality].filter(Boolean).join('\n\n') || undefined,
+        };
+        const extraRes = await generateChatReply(request, agentData, provider, parts, { env, fetcher, pageReader, model, reasoning, search, signal: request.signal });
+        if (!extraRes.ok) return;
+        const extraBody = await extraRes.json().catch(() => null);
+        if (!extraBody?.text) return;
+        const u = extraBody.usage;
+        const tc = Number.isInteger(u?.totalTokens) ? u.totalTokens : ((u?.inputTokens ?? 0) + (u?.outputTokens ?? 0) || null);
+        await conversationChat.commitAssistantMessage({
+          text: extraBody.text,
+          agentId: agent.id,
+          model: data.model,
+          tokenCount: tc,
+          usage: (u && typeof u === 'object') ? u : null,
+        }, request.signal);
+        replies.push({ agentId: agent.id, agentName: agent.name, text: extraBody.text, usage: u });
+      }));
+
+      return json({ ...body, replies }, res.status, Object.fromEntries(res.headers.entries()));
+    }
+
     try {
       const usage = body.usage;
       const tokenCount = Number.isInteger(usage?.totalTokens)
@@ -337,6 +457,7 @@ async function generateValidatedChat(request, data, { env, fetcher, pageReader, 
         : ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) || null);
       await conversationChat.commitAssistantMessage({
         text: body.text,
+        agentId: conversationChat.agentId,
         model: data.model,
         tokenCount,
         usage: (usage && typeof usage === 'object') ? usage : null,

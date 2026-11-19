@@ -148,17 +148,29 @@ Owner-only relational chat history (`dua_conversations`, `dua_messages`). The AP
 | `GET /api/conversations/:id/messages?limit=200&before=ISO` | none. `limit` 1–500, `before` an ISO-8601 timestamp | `{ "messages": [ message ], "hasMore": false }`, oldest first; `404` when the conversation is not the owner's |
 | `PUT /api/conversations/:id/pin` | `{ "pinned": true }` | `{ "conversation": conversation }`, `404` when not found |
 | `DELETE /api/conversations/:id` | none | `204`, `404` when not found. Its messages are deleted too |
+| `GET /api/conversations/:id/agents` | none | `{ "agents": [ { "conversationId": "uuid", "agentId": "slug", "addedAt": "ISO" } ] }` |
+| `POST /api/conversations/:id/agents` | `{ "agentId": "slug" }` | `201` `{ "agent": { "conversationId": "uuid", "agentId": "slug", "addedAt": "ISO" } }` |
+| `DELETE /api/conversations/:id/agents/:agentId` | none | `204`, `404` when not found |
 
 ```json
 {
   "conversation": { "id": "uuid", "agentId": "dua-agent", "title": "New chat", "pinned": false,
     "lastMessagePreview": "", "lastMessageAt": "ISO-8601", "createdAt": "ISO-8601" },
   "message": { "id": "uuid", "conversationId": "uuid", "agentId": null, "role": "user", "content": "",
-    "model": null, "tokenCount": null, "usage": null, "createdAt": "ISO-8601" }
+    "model": null, "tokenCount": null, "usage": null, "createdAt": "ISO-8601" },
+  "conversationAgent": { "conversationId": "uuid", "agentId": "dua-agent", "addedAt": "ISO-8601" }
 }
 ```
 
-For older messages, pass the first message's `createdAt` as `before`. `POST /api/chat` accepts an optional `conversation_id`: it saves the user turn before generation starts, and saves the assistant turn with `agent_id`, `model` and usage on completion (PR D). `/api/cloud` is unchanged.
+For older messages, pass the first message's `createdAt` as `before`. `POST /api/chat` accepts an optional `conversation_id`: it saves the user turn before generation starts, and saves the assistant turn with `agent_id`, `model` and usage on completion (PR D).
+
+**Multi-Agent Group Chat & @mention (Phase 4A):**
+- A conversation can have multiple participating agents via `dua_conversation_agents`.
+- When a user includes `@AgentName` or `@agent-id` in a turn, the backend parses the mentions and dispatches **only** those targeted agents in parallel.
+- If no `@mention` is present in a group thread, all assigned group agents (up to 3) are dispatched concurrently.
+- In SSE streaming mode (`"stream": true`), stream events include `agentId` and `agentName` (e.g. `{ "type": "text", "delta": "...", "agentId": "dua-agent", "agentName": "Dua Agent" }`). Each agent emits an `agent_done` event upon completing.
+- Each responding agent commits its own assistant message turn to `dua_messages` tagged with its `agent_id`.
+- `/api/cloud` is unchanged.
 
 ### Memories (Phase 3 — Universal Living Memory)
 
