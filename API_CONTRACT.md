@@ -160,6 +160,40 @@ Owner-only relational chat history (`dua_conversations`, `dua_messages`). The AP
 
 For older messages, pass the first message's `createdAt` as `before`. `POST /api/chat` accepts an optional `conversation_id`: it saves the user turn before generation starts, and saves the assistant turn with `agent_id`, `model` and usage on completion (PR D). `/api/cloud` is unchanged.
 
+### Memories (Phase 3 — Universal Living Memory)
+
+Owner-only persistent memory (`dua_memories`). The API uses the owner's token and the anon key only. Every response is `Cache-Control: no-store`; errors are `{ "error": "..." }`. `:id` matches `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` (anything else is `404`), wrong methods are `405`, bodies limited to 16 KB.
+
+**Scope:** Every memory has a `scope` field:
+- `"global"` — visible in every conversation and standalone `/api/chat` for this owner.
+- `"group:<conversation_id>"` — visible **only** in the named conversation thread. Never leaked into other threads.
+
+**Auto-extraction:** After each assistant reply inside a `conversation_id` chat, the server non-blockingly extracts up to 2 durable facts/preferences from the turn and saves them as `global` or `group:<conversation_id>` memories. The extraction is silent on failure.
+
+**Context injection:** On every `/api/chat` with a `conversation_id`, the server prepends top-10 relevant memories (`global` + `group:<conversation_id>`) into the model's context. Privacy rule is strict: `group:<other_id>` memories are **never** injected.
+
+| Method and path | Request | Response |
+|---|---|---|
+| `GET /api/memories` | `?scope=global\|group:<uuid>` or `?conversation_id=<uuid>` (optional filters) | `{ "memories": [ memory ] }`, newest first |
+| `POST /api/memories` | `{ "id"?: "mem_...", "title": "", "summary"?: "", "timestamp"?: "", "category"?: "", "url"?: null, "scope"?: "global" }` | `201` `{ "memory": memory }` |
+| `PUT /api/memories/:id` | `{ "scope"?: "global"\|"group:<uuid>", "sourceConversationId"?: null\|"uuid", "title"?: "", "summary"?: "", "category"?: "", "url"?: null }` | `{ "memory": memory }`. Toggles scope and updates fields. `404` when not found |
+| `DELETE /api/memories/:id` | none | `204`, `404` when not found |
+
+```json
+{
+  "memory": {
+    "id": "mem_brand_green",
+    "title": "Brand green is #087C45",
+    "summary": "Never purple or blue.",
+    "timestamp": "4 din pehle",
+    "category": "Preference",
+    "url": null,
+    "scope": "global",
+    "sourceConversationId": null
+  }
+}
+```
+
 ### Agents and skills
 
 Owner-only custom agents and specialized skills (`dua_agents`, `dua_agent_skills`). The API uses the owner's token and the anon key only. Every response is `Cache-Control: no-store`; errors are `{ "error": "..." }`. `:id` is a slug matching `^[a-z0-9][a-z0-9-]{0,63}$` (anything else is `404`), wrong methods are `405`, and bodies are limited to 64 KB.

@@ -10,11 +10,11 @@
 // database call then uses the USER's token, never a service key, so row level
 // security is the second line of defence rather than the only one.
 //
-// The JSON shape is the one the app already parses (see ArtifactsRepository.kt /
-// MemoryRepository.kt in teamily-android-ui):
-//   artifact: { id, title, type, timestamp, sizeBytes, url }
-//   memory:   { id, title, summary, timestamp, category, url }
-// `id` is the app's field name; the column is artifact_id / memory_id.
+// Phase 3 Memory upgrades:
+// - Scope boundary: 'global' (cross-chat) vs 'group:<conversation_id>' (thread-specific).
+// - Privacy-safe retrieval: loads memories for 'global' OR current 'group:<conversation_id>' only.
+// - Scope toggle: PUT /api/memories/:id to modify scope or properties.
+// - Background auto-extraction: extracts durable facts from chat turns non-blockingly.
 import { readJsonLimited } from './limited-json.mjs';
 import { resolveOwner, StorageError } from './storage.mjs';
 
@@ -24,8 +24,26 @@ const ok = body => Response.json(body, { headers: { 'Cache-Control': 'no-store' 
 // The app's ids are opaque strings it generates; keep them to a safe path segment
 // so an id can never change the URL's structure or reach another row.
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+export const SCOPE_REGEX = /^(global|group:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+export const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const MAX_BODY = 16 * 1024;
 const LIST_LIMIT = 200;
+
+const SECRET_PATTERNS = [
+  /[^\s@]+@[^\s@]+\.[^\s@]+/i,                         // email
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/i,        // JWT
+  /\b(sk|pk|rk|xai|sb|ghp|gho|ghs|ghu|github_pat|glpat|AIza|AKIA|ya29)[-_]?[A-Za-z0-9_\-]{10,}/i,
+  /-----BEGIN [A-Z ]*PRIVATE KEY/i,
+  /\bbearer\s+\S{8,}/i,
+  /\b(password|passwd|secret|api[_ -]?key|token|private[_ -]?key)\b\s*[:=]\s*\S+/i,
+  /\b[A-Fa-f0-9]{32,}\b/,                             // long hex
+  /\b[A-Za-z0-9+/_-]{40,}={0,2}/,                     // base64 blob
+];
+
+function isUnsafeMemory(text) {
+  if (!text || typeof text !== 'string') return true;
+  return SECRET_PATTERNS.some(p => p.test(text));
+}
 
 const RESOURCES = {
   artifacts: {
@@ -63,6 +81,8 @@ const RESOURCES = {
       timestamp: row.timestamp || '',
       category: row.category || '',
       url: row.url || null,
+      scope: row.scope || 'global',
+      sourceConversationId: row.source_conversation_id || null,
     }),
   },
 };
@@ -108,6 +128,22 @@ function rowFrom(resource, data, ownerId, now) {
     if (value === undefined) return { error: 'Invalid url.' };
     row.url = value;
   }
+  if (resource.table === 'dua_memories') {
+    if (data.scope !== undefined && data.scope !== null) {
+      if (typeof data.scope !== 'string' || !SCOPE_REGEX.test(data.scope)) return { error: 'Invalid scope.' };
+      row.scope = data.scope;
+    } else {
+      row.scope = 'global';
+    }
+    if (data.sourceConversationId !== undefined && data.sourceConversationId !== null && data.sourceConversationId !== '') {
+      if (typeof data.sourceConversationId !== 'string' || !UUID_REGEX.test(data.sourceConversationId)) return { error: 'Invalid sourceConversationId.' };
+      row.source_conversation_id = data.sourceConversationId;
+    } else if (row.scope.startsWith('group:')) {
+      row.source_conversation_id = row.scope.slice('group:'.length);
+    } else {
+      row.source_conversation_id = null;
+    }
+  }
   return { row };
 }
 
@@ -127,8 +163,9 @@ function upstreamFailure(status) {
  *   GET    /api/artifacts            -> { artifacts: [...] }
  *   POST   /api/artifacts            -> { artifact: {...} }   (201)
  *   DELETE /api/artifacts/:id        -> 204
- *   GET    /api/memories             -> { memories: [...] }
+ *   GET    /api/memories             -> { memories: [...] }   (supports ?scope= and ?conversation_id=)
  *   POST   /api/memories             -> { memory: {...} }     (201)
+ *   PUT    /api/memories/:id         -> { memory: {...} }     (200, scope toggle / edit)
  *   DELETE /api/memories/:id         -> 204
  */
 export async function handleArtifactsMemories(request, { env = process.env, fetcher = fetch } = {}) {
@@ -137,7 +174,7 @@ export async function handleArtifactsMemories(request, { env = process.env, fetc
   if (parts[0] !== 'api' || !resource || parts.length > 3) return noStore('Not found.', 404);
   const id = parts[2] || '';
   if (parts.length === 3 && !ID.test(id)) return noStore('Not found.', 404);
-  const allowed = parts.length === 2 ? ['GET', 'POST'] : ['DELETE'];
+  const allowed = parts.length === 2 ? ['GET', 'POST'] : (resource.table === 'dua_memories' ? ['DELETE', 'PUT'] : ['DELETE']);
   if (!allowed.includes(request.method)) return noStore('Method not allowed.', 405);
 
   let owner;
@@ -161,7 +198,22 @@ export async function handleArtifactsMemories(request, { env = process.env, fetc
 
   try {
     if (request.method === 'GET') {
-      const response = await db(`?select=*&order=updated_at_ms.desc&limit=${LIST_LIMIT}`, { method: 'GET' });
+      const url = new URL(request.url);
+      let filter = `order=updated_at_ms.desc&limit=${LIST_LIMIT}`;
+      if (resource.table === 'dua_memories') {
+        const scopeParam = url.searchParams.get('scope');
+        const convParam = url.searchParams.get('conversation_id') || url.searchParams.get('conversationId');
+        if (convParam) {
+          if (!UUID_REGEX.test(convParam)) return noStore('Invalid conversation_id.', 400);
+          // Privacy boundary: retrieve global + current thread memories only
+          filter += `&scope=in.(global,group:${convParam})`;
+        } else if (scopeParam) {
+          if (!SCOPE_REGEX.test(scopeParam)) return noStore('Invalid scope.', 400);
+          filter += `&scope=eq.${encodeURIComponent(scopeParam)}`;
+        }
+      }
+
+      const response = await db(`?select=*&${filter}`, { method: 'GET' });
       if (!response.ok) return upstreamFailure(response.status);
       const rows = await response.json();
       if (!Array.isArray(rows)) return noStore(`${resource.feature} returned an invalid list.`, 502);
@@ -188,6 +240,60 @@ export async function handleArtifactsMemories(request, { env = process.env, fetc
       return Response.json({ [resource.itemKey]: resource.present(stored) }, { status: 201, headers: { 'Cache-Control': 'no-store' } });
     }
 
+    if (request.method === 'PUT') {
+      let data;
+      try { data = await readJsonLimited(request, MAX_BODY); }
+      catch (error) { return noStore(error.status === 413 ? 'This item is too large.' : 'Invalid request.', error.status || 400); }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return noStore('Invalid request.', 400);
+
+      const patch = { updated_at_ms: Date.now() };
+      if (data.scope !== undefined) {
+        if (typeof data.scope !== 'string' || !SCOPE_REGEX.test(data.scope)) return noStore('Invalid scope.', 400);
+        patch.scope = data.scope;
+        if (data.scope.startsWith('group:')) {
+          patch.source_conversation_id = data.scope.slice('group:'.length);
+        } else if (data.scope === 'global' && data.sourceConversationId === null) {
+          patch.source_conversation_id = null;
+        }
+      }
+      if (data.sourceConversationId !== undefined) {
+        if (data.sourceConversationId !== null && (typeof data.sourceConversationId !== 'string' || !UUID_REGEX.test(data.sourceConversationId))) {
+          return noStore('Invalid sourceConversationId.', 400);
+        }
+        patch.source_conversation_id = data.sourceConversationId;
+      }
+      if (data.title !== undefined) {
+        const titleVal = text(data.title, 200, true);
+        if (titleVal === null) return noStore('Invalid title.', 400);
+        patch.title = titleVal;
+      }
+      if (data.summary !== undefined) {
+        const summaryVal = text(data.summary, 2000, false);
+        if (summaryVal === null) return noStore('Invalid summary.', 400);
+        patch.summary = summaryVal;
+      }
+      if (data.category !== undefined) {
+        const catVal = text(data.category, 40, false);
+        if (catVal === null) return noStore('Invalid category.', 400);
+        patch.category = catVal;
+      }
+      if (data.url !== undefined) {
+        const linkVal = link(data.url);
+        if (linkVal === undefined) return noStore('Invalid url.', 400);
+        patch.url = linkVal;
+      }
+
+      const response = await db(`?memory_id=eq.${encodeURIComponent(id)}&owner_id=eq.${encodeURIComponent(owner.user.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
+        body: JSON.stringify(patch),
+      });
+      if (!response.ok) return upstreamFailure(response.status);
+      const updated = await response.json().catch(() => []);
+      if (!Array.isArray(updated) || updated.length === 0) return noStore('That item was not found.', 404);
+      return ok({ memory: resource.present(updated[0]) });
+    }
+
     // DELETE: the owner filter is explicit as well as enforced by RLS, so a
     // missing policy can never turn this into a cross-account delete.
     const response = await db(`?${resource.idColumn}=eq.${encodeURIComponent(id)}&owner_id=eq.${encodeURIComponent(owner.user.id)}`, {
@@ -202,4 +308,120 @@ export async function handleArtifactsMemories(request, { env = process.env, fetc
     if (error instanceof Response) return error;
     return noStore(`${resource.feature} is temporarily unavailable. Retry.`, 502);
   }
+}
+
+/**
+ * Loads privacy-safe memories for the owner:
+ * - If conversationId is given: loads where scope is 'global' OR 'group:<conversationId>'.
+ * - If no conversationId: loads where scope is 'global' only.
+ * - Never returns memories tagged with other group:<id> scopes.
+ */
+export async function loadPrivacySafeMemories({ base, headers, ownerId, conversationId = null, fetcher = fetch, signal = null, limit = 10 }) {
+  if (!base || !headers || !ownerId) return [];
+  const scopeFilter = conversationId && UUID_REGEX.test(conversationId)
+    ? `scope=in.(global,group:${conversationId})`
+    : 'scope=eq.global';
+  const ownerFilter = `owner_id=eq.${encodeURIComponent(ownerId)}`;
+  try {
+    const res = await fetcher(`${base}/rest/v1/dua_memories?select=memory_id,title,summary,category,scope,source_conversation_id&${ownerFilter}&${scopeFilter}&order=updated_at_ms.desc&limit=${limit}`, {
+      method: 'GET',
+      headers,
+      redirect: 'error',
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return [];
+    const rows = await res.json().catch(() => []);
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Formats memory rows into a structured notes block for context injection. */
+export function formatMemories(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return '';
+  return rows.map(r => {
+    const scopeLabel = r.scope === 'global' ? 'global' : 'thread';
+    const cat = r.category ? ` (${r.category})` : '';
+    const body = r.summary ? `${r.title}: ${r.summary}` : r.title;
+    return `- [${scopeLabel}${cat}] ${body}`.trim();
+  }).join('\n');
+}
+
+/**
+ * Background auto-extraction: extracts durable facts/preferences from a chat turn.
+ * Runs non-blockingly via queueMicrotask, never affects the ongoing chat stream/response.
+ */
+export function triggerMemoryAutoExtraction({ userText, assistantText, conversationId = null, owner, env = process.env, fetcher = fetch }) {
+  if (env.DISABLE_MEMORY_EXTRACTION === '1' || !owner?.user?.id || !owner?.token) return;
+  if (!userText || typeof userText !== 'string' || userText.length < 5) return;
+  const base = String(env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = String(env.SUPABASE_ANON_KEY || '');
+  const geminiKey = env.GEMINI_API_KEY;
+  if (!base || !key || !geminiKey) return;
+
+  const model = env.GEMINI_MODEL || 'gemini-3.8-flash';
+  const extractUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`;
+
+  queueMicrotask(async () => {
+    try {
+      const prompt = `You are a memory extractor for an AI assistant. Analyze this single conversation turn and extract 0 to 2 durable facts or user preferences worth remembering for future sessions.\n\nClassification rules:\n- "global": General preferences (e.g. coding style, preferred framework, tone, language, domain) that apply to ANY future conversation.\n- "thread": Project-specific, architecture, or sensitive thread facts (e.g. project setup, current repo name, local ports) that apply ONLY to this specific thread.\n\nSkip transient Q&A, greetings, one-off bugs, and sensitive data (passwords, tokens, keys, emails, secrets).\n\nUser: ${userText.slice(0, 1500)}\nAssistant: ${(assistantText || '').slice(0, 1500)}\n\nReply with JSON ONLY:\n{"memories": [{"title": "short title max 50 chars", "summary": "brief summary max 200 chars", "category": "preference|fact|project", "scope": "global|thread"}]}`;
+
+      const res = await fetcher(extractUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: 512, temperature: 0.2 },
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) return;
+      const json = await res.json().catch(() => null);
+      const textVal = json?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      const cleanJson = textVal.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+      const parsed = JSON.parse(cleanJson);
+      const items = Array.isArray(parsed?.memories) ? parsed.memories : [];
+
+      for (const item of items.slice(0, 2)) {
+        if (!item || typeof item !== 'object') continue;
+        const title = (typeof item.title === 'string' ? item.title.trim() : '').slice(0, 200);
+        const summary = (typeof item.summary === 'string' ? item.summary.trim() : '').slice(0, 2000);
+        if (!title || isUnsafeMemory(title) || isUnsafeMemory(summary)) continue;
+
+        const isThread = item.scope === 'thread' && conversationId;
+        const scope = isThread ? `group:${conversationId}` : 'global';
+        const now = Date.now();
+        const memId = 'mem_' + crypto.randomUUID().replace(/-/g, '').slice(0, 20);
+
+        const row = {
+          owner_id: owner.user.id,
+          memory_id: memId,
+          title,
+          summary,
+          timestamp: 'Just now',
+          category: (typeof item.category === 'string' ? item.category.trim() : 'fact').slice(0, 40),
+          url: null,
+          scope,
+          source_conversation_id: isThread ? conversationId : null,
+          created_at_ms: now,
+          updated_at_ms: now,
+        };
+
+        await fetcher(`${base}/rest/v1/dua_memories`, {
+          method: 'POST',
+          headers: {
+            apikey: key,
+            Authorization: `Bearer ${owner.token}`,
+            'Content-Type': 'application/json',
+            Prefer: 'return=minimal',
+          },
+          body: JSON.stringify(row),
+          signal: AbortSignal.timeout(10000),
+        }).catch(() => {});
+      }
+    } catch {
+      // Non-blocking background extraction never throws
+    }
+  });
 }

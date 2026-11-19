@@ -117,6 +117,15 @@ shipped behaviour; this file describes the target and the order of work.
 - Skills CRUD: starter skills loaded without DB seed, overrides persisted, custom skills created/deleted.
 - Unlimited skills: removed static skill cap in Python engine (`MAX_COMPOSED_PROMPT_CHARS = 120_000` guard) and Node web chat (`SKILL_ID` regex).
 
+### PR F: Universal Living Memory + Privacy Boundaries (completed)
+
+- **Migration** `202611190003_dua_memories_scope.sql`: added `scope text not null default 'global'` (check: `'global'` or `'group:<uuid>'`) and `source_conversation_id uuid` columns to `dua_memories`, plus `dua_memories_owner_scope_idx` on `(owner_id, scope, updated_at_ms desc)`.
+- **Scope boundary**: memories are tagged `global` (all conversations) or `group:<conversation_id>` (single thread only). The PostgREST filter `scope=in.(global,group:<id>)` is the strict privacy boundary — `group:<other_id>` memories can never leak cross-thread.
+- **PUT /api/memories/:id**: new endpoint to toggle `scope`, `sourceConversationId`, `title`, `summary`, `category`, `url`.
+- **Privacy-safe context injection** (`loadPrivacySafeMemories`): on every `/api/chat` with `conversation_id`, top-10 memories are prepended to the model context. Exported from `artifacts-memories.mjs`, called in `prepareConversationChat`.
+- **Background auto-extraction** (`triggerMemoryAutoExtraction`): non-blocking `queueMicrotask` after each assistant reply. Calls Gemini to extract 0–2 durable facts, filters secrets with `SECRET_PATTERNS`, saves as `global` or `group:<conversation_id>`. Skipped silently if `DISABLE_MEMORY_EXTRACTION=1` or Gemini key missing.
+- **Tests**: 6 new Phase 3 tests in `artifacts-memories.test.mjs` covering scope defaults, PUT toggle, invalid scope rejection, `?scope=global` filter, and cross-thread privacy boundary.
+
 ## 4. Out of scope until separately approved
 
 - Running `db push` or any deploy.
