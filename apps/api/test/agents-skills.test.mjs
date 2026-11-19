@@ -21,6 +21,8 @@ function call(method, path, body, { token = 'user-token', headers = {} } = {}) {
 function database() {
   const agents = [];
   const skills = [];
+  const instructions = [];
+  const triggers = [];
   let clock = Date.parse('2026-11-19T00:00:00Z');
   const stamp = () => new Date(clock += 1000).toISOString();
   const ownerOf = init => new Headers(init.headers).get('authorization') === 'Bearer user-token' ? UID : 'nobody';
@@ -47,7 +49,12 @@ function database() {
     });
   };
 
-  const tables = { dua_agents: agents, dua_agent_skills: skills };
+  const tables = {
+    dua_agents: agents,
+    dua_agent_skills: skills,
+    dua_agent_instructions: instructions,
+    dua_agent_triggers: triggers,
+  };
 
   const routes = [
     [url => url.startsWith(`${SUPA}/rest/v1/`), (url, init) => {
@@ -75,7 +82,7 @@ function database() {
 
         const prefer = headers.get('prefer') || '';
         const isUpsert = prefer.includes('resolution=merge-duplicates');
-        const existingIdx = rows.findIndex(r => r.id === body.id && r.owner_id === body.owner_id);
+        const existingIdx = body.id ? rows.findIndex(r => r.id === body.id && r.owner_id === body.owner_id) : -1;
 
         if (existingIdx >= 0) {
           if (isUpsert) {
@@ -85,7 +92,7 @@ function database() {
           return Response.json({ message: 'duplicate key' }, { status: 409 });
         }
 
-        const row = { created_at: stamp(), updated_at: stamp(), ...body };
+        const row = { id: crypto.randomUUID(), created_at: stamp(), updated_at: stamp(), ...body };
         rows.push(row);
         return Response.json([row], { status: 201 });
       }
@@ -135,7 +142,7 @@ function database() {
     }]
   ];
 
-  return { agents, skills, routes };
+  return { agents, skills, instructions, triggers, routes };
 }
 
 test('starter skills load from dua_agent_prompts.json and official agents are defined', () => {
@@ -331,4 +338,143 @@ test('Security & owner lock: non-owner and unauthenticated access are blocked', 
   const badOwnerFetcher = router(db.routes, { email: 'stranger@example.com' });
   const forbidden = await handleService(call('GET', '/api/agents'), { env, fetcher: badOwnerFetcher });
   assert.equal(forbidden.status, 403);
+});
+
+// ─── Phase 4C: Proactive Agents (Instructions & Triggers) ─────────────────────
+
+test('Phase 4C: Proactive Agents — Instructions CRUD (GET, POST, PUT, DELETE)', async () => {
+  const db = database();
+  const fetcher = router(db.routes);
+
+  // 1. POST instruction
+  const postRes = await handleService(call('POST', '/api/agents/personal-agent/instructions', {
+    instruction: 'Always format Kotlin code with official style guidelines',
+    isActive: true,
+  }), { env, fetcher });
+  assert.equal(postRes.status, 201);
+  const { instruction } = await postRes.json();
+  assert.ok(instruction.id);
+  assert.equal(instruction.agentId, 'personal-agent');
+  assert.equal(instruction.instruction, 'Always format Kotlin code with official style guidelines');
+  assert.equal(instruction.isActive, true);
+
+  // 2. GET instructions list
+  const listRes = await handleService(call('GET', '/api/agents/personal-agent/instructions'), { env, fetcher });
+  assert.equal(listRes.status, 200);
+  const listJson = await listRes.json();
+  assert.equal(listJson.instructions.length, 1);
+  assert.equal(listJson.instructions[0].id, instruction.id);
+
+  // 3. GET single instruction
+  const getSingle = await handleService(call('GET', `/api/agents/personal-agent/instructions/${instruction.id}`), { env, fetcher });
+  assert.equal(getSingle.status, 200);
+  assert.equal((await getSingle.json()).instruction.id, instruction.id);
+
+  // 4. PUT instruction (deactivate)
+  const putRes = await handleService(call('PUT', `/api/agents/personal-agent/instructions/${instruction.id}`, {
+    isActive: false,
+  }), { env, fetcher });
+  assert.equal(putRes.status, 200);
+  assert.equal((await putRes.json()).instruction.isActive, false);
+
+  // 5. DELETE instruction
+  const delRes = await handleService(call('DELETE', `/api/agents/personal-agent/instructions/${instruction.id}`), { env, fetcher });
+  assert.equal(delRes.status, 204);
+
+  // 6. Verify empty list
+  const emptyList = await handleService(call('GET', '/api/agents/personal-agent/instructions'), { env, fetcher });
+  assert.equal(emptyList.status, 200);
+  assert.equal((await emptyList.json()).instructions.length, 0);
+});
+
+test('Phase 4C: Proactive Agents — Triggers CRUD & Run (GET, POST, PUT, DELETE, POST /run)', async () => {
+  const db = database();
+  const fetcher = router(db.routes);
+
+  // 1. POST trigger
+  const postRes = await handleService(call('POST', '/api/agents/dua-agent/triggers', {
+    triggerType: 'schedule',
+    cronExpr: '0 9 * * 1-5',
+    prompt: 'Summarize unread GitHub PRs and morning tasks',
+    enabled: true,
+  }), { env, fetcher });
+  assert.equal(postRes.status, 201);
+  const { trigger } = await postRes.json();
+  assert.ok(trigger.id);
+  assert.equal(trigger.agentId, 'dua-agent');
+  assert.equal(trigger.triggerType, 'schedule');
+  assert.equal(trigger.cronExpr, '0 9 * * 1-5');
+  assert.equal(trigger.prompt, 'Summarize unread GitHub PRs and morning tasks');
+  assert.equal(trigger.enabled, true);
+  assert.equal(trigger.lastRunAt, null);
+
+  // 2. GET triggers list
+  const listRes = await handleService(call('GET', '/api/agents/dua-agent/triggers'), { env, fetcher });
+  assert.equal(listRes.status, 200);
+  const listJson = await listRes.json();
+  assert.equal(listJson.triggers.length, 1);
+  assert.equal(listJson.triggers[0].id, trigger.id);
+
+  // 3. GET single trigger
+  const getSingle = await handleService(call('GET', `/api/agents/dua-agent/triggers/${trigger.id}`), { env, fetcher });
+  assert.equal(getSingle.status, 200);
+  assert.equal((await getSingle.json()).trigger.id, trigger.id);
+
+  // 4. PUT trigger (update cron and prompt)
+  const putRes = await handleService(call('PUT', `/api/agents/dua-agent/triggers/${trigger.id}`, {
+    cronExpr: '0 10 * * 1-5',
+    prompt: 'Updated morning summary',
+  }), { env, fetcher });
+  assert.equal(putRes.status, 200);
+  const updatedTrigger = (await putRes.json()).trigger;
+  assert.equal(updatedTrigger.cronExpr, '0 10 * * 1-5');
+  assert.equal(updatedTrigger.prompt, 'Updated morning summary');
+
+  // 5. POST run trigger manually
+  const runRes = await handleService(call('POST', `/api/agents/dua-agent/triggers/${trigger.id}/run`), { env, fetcher });
+  assert.equal(runRes.status, 200);
+  const runJson = await runRes.json();
+  assert.equal(runJson.triggered, true);
+  assert.ok(runJson.trigger.lastRunAt);
+
+  // 6. DELETE trigger
+  const delRes = await handleService(call('DELETE', `/api/agents/dua-agent/triggers/${trigger.id}`), { env, fetcher });
+  assert.equal(delRes.status, 204);
+
+  // 7. Verify empty list
+  const emptyList = await handleService(call('GET', '/api/agents/dua-agent/triggers'), { env, fetcher });
+  assert.equal(emptyList.status, 200);
+  assert.equal((await emptyList.json()).triggers.length, 0);
+});
+
+test('Phase 4C: Proactive Agents — Validation & 404s for nonexistent agents or invalid triggers', async () => {
+  const db = database();
+  const fetcher = router(db.routes);
+
+  // Nonexistent agent -> 404
+  const noAgent = await handleService(call('GET', '/api/agents/non-existent-agent-slug/instructions'), { env, fetcher });
+  assert.equal(noAgent.status, 404);
+
+  // Empty instruction -> 400
+  const emptyInst = await handleService(call('POST', '/api/agents/personal-agent/instructions', { instruction: '   ' }), { env, fetcher });
+  assert.equal(emptyInst.status, 400);
+
+  // Invalid triggerType -> 400
+  const badTriggerType = await handleService(call('POST', '/api/agents/personal-agent/triggers', {
+    triggerType: 'invalid_type',
+    prompt: 'Do something',
+  }), { env, fetcher });
+  assert.equal(badTriggerType.status, 400);
+
+  // Schedule trigger without cronExpr -> 400
+  const noCron = await handleService(call('POST', '/api/agents/personal-agent/triggers', {
+    triggerType: 'schedule',
+    prompt: 'Do something',
+  }), { env, fetcher });
+  assert.equal(noCron.status, 400);
+
+  // Nonexistent trigger run -> 404
+  const fakeId = '00000000-0000-0000-0000-000000000000';
+  const badRun = await handleService(call('POST', `/api/agents/personal-agent/triggers/${fakeId}/run`), { env, fetcher });
+  assert.equal(badRun.status, 404);
 });

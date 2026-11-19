@@ -19,6 +19,8 @@ const noStore = (error, status) => Response.json({ error }, { status, headers: {
 const ok = (body, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 
 export const SLUG_REGEX = /^[a-z0-9][a-z0-9-]{0,63}$/;
+export const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+export const TRIGGER_TYPES = new Set(['schedule', 'webhook', 'missed_summary']);
 const MAX_BODY = 64 * 1024;
 const MODES = new Set(['auto', 'agent', 'reasoning', 'build']);
 
@@ -92,6 +94,26 @@ const presentSkill = (row, isStarter = false) => ({
   updatedAt: row.updated_at || null,
 });
 
+export const presentInstruction = row => ({
+  id: row.id,
+  agentId: row.agent_id,
+  instruction: row.instruction,
+  isActive: row.is_active !== false,
+  createdAt: row.created_at,
+});
+
+export const presentTrigger = row => ({
+  id: row.id,
+  agentId: row.agent_id,
+  conversationId: row.conversation_id || null,
+  triggerType: row.trigger_type,
+  cronExpr: row.cron_expr || null,
+  prompt: row.prompt,
+  enabled: row.enabled !== false,
+  lastRunAt: row.last_run_at || null,
+  createdAt: row.created_at,
+});
+
 function upstreamFailure(status, feature = 'Agents and skills') {
   if (status === 401) return noStore('Session expired. Sign in again.', 401);
   if (status === 403) return noStore(`This account cannot use ${feature}.`, 403);
@@ -111,12 +133,19 @@ const isObject = value => Boolean(value) && typeof value === 'object' && !Array.
 export async function handleAgentsSkills(request, { env = process.env, fetcher = fetch } = {}) {
   const url = new URL(request.url);
   const parts = url.pathname.split('/').filter(Boolean);
-  if (parts[0] !== 'api' || !['agents', 'skills'].includes(parts[1]) || parts.length > 3) {
+  if (parts[0] !== 'api' || !['agents', 'skills'].includes(parts[1])) {
     return noStore('Not found.', 404);
   }
 
   const resource = parts[1]; // 'agents' | 'skills'
   const sub = parts[2] || '';
+
+  if (resource === 'skills' && parts.length > 3) {
+    return noStore('Not found.', 404);
+  }
+  if (resource === 'agents' && parts.length > 6) {
+    return noStore('Not found.', 404);
+  }
 
   // AI generator endpoints in Node
   if (resource === 'agents' && sub === 'generate-prompt') {
@@ -128,8 +157,28 @@ export async function handleAgentsSkills(request, { env = process.env, fetcher =
     return handleGenerateSkill(request, { env, fetcher });
   }
 
-  const allowed = parts.length === 2 ? ['GET', 'POST'] : ['GET', 'PUT', 'DELETE'];
-  if (!allowed.includes(request.method)) return noStore('Method not allowed.', 405);
+  let allowedMethods;
+  if (parts.length === 2) {
+    allowedMethods = ['GET', 'POST'];
+  } else if (parts.length === 3) {
+    allowedMethods = ['GET', 'PUT', 'DELETE'];
+  } else if (parts.length === 4) {
+    if (resource !== 'agents' || !['instructions', 'triggers'].includes(parts[3])) {
+      return noStore('Not found.', 404);
+    }
+    allowedMethods = ['GET', 'POST'];
+  } else if (parts.length === 5) {
+    if (resource !== 'agents' || !['instructions', 'triggers'].includes(parts[3])) {
+      return noStore('Not found.', 404);
+    }
+    allowedMethods = ['GET', 'PUT', 'DELETE'];
+  } else if (parts.length === 6) {
+    if (resource !== 'agents' || parts[3] !== 'triggers' || parts[5] !== 'run') {
+      return noStore('Not found.', 404);
+    }
+    allowedMethods = ['POST'];
+  }
+  if (!allowedMethods || !allowedMethods.includes(request.method)) return noStore('Method not allowed.', 405);
 
   let owner;
   try {
@@ -235,6 +284,281 @@ export async function handleAgentsSkills(request, { env = process.env, fetcher =
         const stored = (await rowsOf(response))?.[0];
         if (!stored) return noStore('Agents did not confirm the save.', 502);
         return ok({ agent: presentAgent(stored) }, 201);
+      }
+
+      if (parts.length >= 4) {
+        const agentId = sub.toLowerCase();
+        if (!SLUG_REGEX.test(agentId)) return noStore('Not found.', 404);
+        const isOfficial = OFFICIAL_AGENTS.some(o => o.id === agentId);
+        if (!isOfficial) {
+          const chk = await db('dua_agents', `?select=id&id=eq.${encodeURIComponent(agentId)}&${ownerFilter}&limit=1`, { method: 'GET' });
+          if (!chk.ok) return upstreamFailure(chk.status, 'Agents');
+          const found = await rowsOf(chk);
+          if (!found || !found.length) return noStore('That agent was not found.', 404);
+        }
+
+        const subResource = parts[3];
+
+        if (subResource === 'instructions') {
+          // GET /api/agents/:id/instructions
+          if (parts.length === 4 && request.method === 'GET') {
+            const response = await db('dua_agent_instructions', `?select=*&agent_id=eq.${encodeURIComponent(agentId)}&${ownerFilter}&order=created_at.desc`, { method: 'GET' });
+            if (!response.ok) return upstreamFailure(response.status, 'Instructions');
+            const rows = await rowsOf(response);
+            if (!rows) return noStore('Instructions returned an invalid list.', 502);
+            return ok({ instructions: rows.map(presentInstruction) });
+          }
+
+          // POST /api/agents/:id/instructions
+          if (parts.length === 4 && request.method === 'POST') {
+            const { data, response: invalid } = await readBody(request);
+            if (invalid) return invalid;
+            if (!isObject(data)) return noStore('Invalid request.', 400);
+
+            const instruction = typeof data.instruction === 'string' ? data.instruction.trim() : '';
+            if (!instruction || instruction.length > 20000) return noStore('Invalid instruction.', 400);
+
+            const isActive = data.isActive !== false;
+            const now = new Date().toISOString();
+            const row = {
+              owner_id: owner.user.id,
+              agent_id: agentId,
+              instruction,
+              is_active: isActive,
+              created_at: now,
+            };
+
+            const response = await db('dua_agent_instructions', '?select=*', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
+              body: JSON.stringify(row),
+            });
+            if (!response.ok) return upstreamFailure(response.status, 'Instructions');
+            const stored = (await rowsOf(response))?.[0];
+            if (!stored) return noStore('Instructions did not confirm the save.', 502);
+            return ok({ instruction: presentInstruction(stored) }, 201);
+          }
+
+          if (parts.length === 5) {
+            const instructionId = parts[4];
+            if (!UUID_REGEX.test(instructionId)) return noStore('Not found.', 404);
+
+            // GET /api/agents/:id/instructions/:instructionId
+            if (request.method === 'GET') {
+              const response = await db('dua_agent_instructions', `?select=*&id=eq.${encodeURIComponent(instructionId)}&agent_id=eq.${encodeURIComponent(agentId)}&${ownerFilter}&limit=1`, { method: 'GET' });
+              if (!response.ok) return upstreamFailure(response.status, 'Instructions');
+              const stored = (await rowsOf(response))?.[0];
+              if (!stored) return noStore('That instruction was not found.', 404);
+              return ok({ instruction: presentInstruction(stored) });
+            }
+
+            // PUT /api/agents/:id/instructions/:instructionId
+            if (request.method === 'PUT') {
+              const { data, response: invalid } = await readBody(request);
+              if (invalid) return invalid;
+              if (!isObject(data)) return noStore('Invalid request.', 400);
+
+              const patch = {};
+              if (data.instruction !== undefined) {
+                const inst = typeof data.instruction === 'string' ? data.instruction.trim() : '';
+                if (!inst || inst.length > 20000) return noStore('Invalid instruction.', 400);
+                patch.instruction = inst;
+              }
+              if (data.isActive !== undefined) {
+                if (typeof data.isActive !== 'boolean') return noStore('Invalid isActive.', 400);
+                patch.is_active = data.isActive;
+              }
+              if (Object.keys(patch).length === 0) return noStore('No fields to update.', 400);
+
+              const response = await db('dua_agent_instructions', `?select=*&id=eq.${encodeURIComponent(instructionId)}&agent_id=eq.${encodeURIComponent(agentId)}&${ownerFilter}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
+                body: JSON.stringify(patch),
+              });
+              if (!response.ok) return upstreamFailure(response.status, 'Instructions');
+              const rows = await rowsOf(response);
+              if (!rows || !rows.length) return noStore('That instruction was not found.', 404);
+              return ok({ instruction: presentInstruction(rows[0]) });
+            }
+
+            // DELETE /api/agents/:id/instructions/:instructionId
+            if (request.method === 'DELETE') {
+              const response = await db('dua_agent_instructions', `?id=eq.${encodeURIComponent(instructionId)}&agent_id=eq.${encodeURIComponent(agentId)}&${ownerFilter}`, {
+                method: 'DELETE',
+                headers: { Prefer: 'return=representation' },
+              });
+              if (!response.ok) return upstreamFailure(response.status, 'Instructions');
+              const removed = await rowsOf(response);
+              if (!removed || !removed.length) return noStore('That instruction was not found.', 404);
+              return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
+            }
+          }
+
+          return noStore('Not found.', 404);
+        }
+
+        if (subResource === 'triggers') {
+          // GET /api/agents/:id/triggers
+          if (parts.length === 4 && request.method === 'GET') {
+            const response = await db('dua_agent_triggers', `?select=*&agent_id=eq.${encodeURIComponent(agentId)}&${ownerFilter}&order=created_at.desc`, { method: 'GET' });
+            if (!response.ok) return upstreamFailure(response.status, 'Triggers');
+            const rows = await rowsOf(response);
+            if (!rows) return noStore('Triggers returned an invalid list.', 502);
+            return ok({ triggers: rows.map(presentTrigger) });
+          }
+
+          // POST /api/agents/:id/triggers
+          if (parts.length === 4 && request.method === 'POST') {
+            const { data, response: invalid } = await readBody(request);
+            if (invalid) return invalid;
+            if (!isObject(data)) return noStore('Invalid request.', 400);
+
+            const triggerType = typeof data.triggerType === 'string' ? data.triggerType.trim().toLowerCase() : '';
+            if (!TRIGGER_TYPES.has(triggerType)) return noStore('Invalid triggerType. Must be schedule, webhook, or missed_summary.', 400);
+
+            const prompt = typeof data.prompt === 'string' ? data.prompt.trim() : '';
+            if (!prompt || prompt.length > 10000) return noStore('Invalid prompt.', 400);
+
+            let cronExpr = null;
+            if (data.cronExpr !== undefined && data.cronExpr !== null) {
+              if (typeof data.cronExpr !== 'string' || data.cronExpr.length > 100) return noStore('Invalid cronExpr.', 400);
+              cronExpr = data.cronExpr.trim() || null;
+            }
+            if (triggerType === 'schedule' && !cronExpr) {
+              return noStore('cronExpr is required for schedule triggers.', 400);
+            }
+
+            let conversationId = null;
+            if (data.conversationId !== undefined && data.conversationId !== null) {
+              if (typeof data.conversationId !== 'string' || !UUID_REGEX.test(data.conversationId)) {
+                return noStore('Invalid conversationId.', 400);
+              }
+              conversationId = data.conversationId;
+            }
+
+            const enabled = data.enabled !== false;
+            const now = new Date().toISOString();
+            const row = {
+              owner_id: owner.user.id,
+              agent_id: agentId,
+              trigger_type: triggerType,
+              cron_expr: cronExpr,
+              prompt,
+              conversation_id: conversationId,
+              enabled,
+              created_at: now,
+            };
+
+            const response = await db('dua_agent_triggers', '?select=*', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
+              body: JSON.stringify(row),
+            });
+            if (!response.ok) return upstreamFailure(response.status, 'Triggers');
+            const stored = (await rowsOf(response))?.[0];
+            if (!stored) return noStore('Triggers did not confirm the save.', 502);
+            return ok({ trigger: presentTrigger(stored) }, 201);
+          }
+
+          if (parts.length === 5) {
+            const triggerId = parts[4];
+            if (!UUID_REGEX.test(triggerId)) return noStore('Not found.', 404);
+
+            // GET /api/agents/:id/triggers/:triggerId
+            if (request.method === 'GET') {
+              const response = await db('dua_agent_triggers', `?select=*&id=eq.${encodeURIComponent(triggerId)}&agent_id=eq.${encodeURIComponent(agentId)}&${ownerFilter}&limit=1`, { method: 'GET' });
+              if (!response.ok) return upstreamFailure(response.status, 'Triggers');
+              const stored = (await rowsOf(response))?.[0];
+              if (!stored) return noStore('That trigger was not found.', 404);
+              return ok({ trigger: presentTrigger(stored) });
+            }
+
+            // PUT /api/agents/:id/triggers/:triggerId
+            if (request.method === 'PUT') {
+              const { data, response: invalid } = await readBody(request);
+              if (invalid) return invalid;
+              if (!isObject(data)) return noStore('Invalid request.', 400);
+
+              const patch = {};
+              if (data.triggerType !== undefined) {
+                const tt = typeof data.triggerType === 'string' ? data.triggerType.trim().toLowerCase() : '';
+                if (!TRIGGER_TYPES.has(tt)) return noStore('Invalid triggerType.', 400);
+                patch.trigger_type = tt;
+              }
+              if (data.prompt !== undefined) {
+                const p = typeof data.prompt === 'string' ? data.prompt.trim() : '';
+                if (!p || p.length > 10000) return noStore('Invalid prompt.', 400);
+                patch.prompt = p;
+              }
+              if (data.cronExpr !== undefined) {
+                if (data.cronExpr === null || data.cronExpr === '') {
+                  patch.cron_expr = null;
+                } else {
+                  if (typeof data.cronExpr !== 'string' || data.cronExpr.length > 100) return noStore('Invalid cronExpr.', 400);
+                  patch.cron_expr = data.cronExpr.trim();
+                }
+              }
+              if (data.conversationId !== undefined) {
+                if (data.conversationId === null || data.conversationId === '') {
+                  patch.conversation_id = null;
+                } else {
+                  if (typeof data.conversationId !== 'string' || !UUID_REGEX.test(data.conversationId)) {
+                    return noStore('Invalid conversationId.', 400);
+                  }
+                  patch.conversation_id = data.conversationId;
+                }
+              }
+              if (data.enabled !== undefined) {
+                if (typeof data.enabled !== 'boolean') return noStore('Invalid enabled.', 400);
+                patch.enabled = data.enabled;
+              }
+              if (Object.keys(patch).length === 0) return noStore('No fields to update.', 400);
+
+              const response = await db('dua_agent_triggers', `?select=*&id=eq.${encodeURIComponent(triggerId)}&agent_id=eq.${encodeURIComponent(agentId)}&${ownerFilter}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
+                body: JSON.stringify(patch),
+              });
+              if (!response.ok) return upstreamFailure(response.status, 'Triggers');
+              const rows = await rowsOf(response);
+              if (!rows || !rows.length) return noStore('That trigger was not found.', 404);
+              return ok({ trigger: presentTrigger(rows[0]) });
+            }
+
+            // DELETE /api/agents/:id/triggers/:triggerId
+            if (request.method === 'DELETE') {
+              const response = await db('dua_agent_triggers', `?id=eq.${encodeURIComponent(triggerId)}&agent_id=eq.${encodeURIComponent(agentId)}&${ownerFilter}`, {
+                method: 'DELETE',
+                headers: { Prefer: 'return=representation' },
+              });
+              if (!response.ok) return upstreamFailure(response.status, 'Triggers');
+              const removed = await rowsOf(response);
+              if (!removed || !removed.length) return noStore('That trigger was not found.', 404);
+              return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
+            }
+          }
+
+          // POST /api/agents/:id/triggers/:triggerId/run
+          if (parts.length === 6 && parts[5] === 'run') {
+            const triggerId = parts[4];
+            if (!UUID_REGEX.test(triggerId)) return noStore('Not found.', 404);
+
+            const now = new Date().toISOString();
+            const response = await db('dua_agent_triggers', `?select=*&id=eq.${encodeURIComponent(triggerId)}&agent_id=eq.${encodeURIComponent(agentId)}&${ownerFilter}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
+              body: JSON.stringify({ last_run_at: now }),
+            });
+            if (!response.ok) return upstreamFailure(response.status, 'Triggers');
+            const rows = await rowsOf(response);
+            if (!rows || !rows.length) return noStore('That trigger was not found.', 404);
+            return ok({ triggered: true, trigger: presentTrigger(rows[0]) });
+          }
+
+          return noStore('Not found.', 404);
+        }
+
+        return noStore('Not found.', 404);
       }
 
       const id = sub.toLowerCase();

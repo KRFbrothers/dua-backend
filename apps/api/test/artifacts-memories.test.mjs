@@ -288,3 +288,127 @@ test('Phase 3: privacy boundary — group:<CONV_B> memory never leaks into CONV_
   const list = (await res.json()).memories;
   assert.equal(list.some(m => m.id === 'mem_b_secret'), false, 'Thread B memory must not appear in Thread A query');
 });
+
+// ─── Phase 4B: Collaborative Studios (Artifact Versions & Revise) ──────────────
+
+function studioStore() {
+  const artifacts = [];
+  const versions = [];
+  let clock = Date.parse('2026-11-19T00:00:00Z');
+  const stamp = () => new Date(clock += 1000).toISOString();
+
+  const routes = [
+    [url => url.startsWith(`${SUPA}/rest/v1/dua_artifacts`), (url, init) => {
+      const method = init.method || 'GET';
+      const query = new URL(url).searchParams;
+      const owner = query.get('owner_id')?.replace('eq.', '');
+      const artId = query.get('artifact_id')?.replace('eq.', '');
+
+      if (method === 'GET') {
+        let list = artifacts.filter(r => (!owner || r.owner_id === owner) && (!artId || r.artifact_id === artId));
+        return Response.json(list);
+      }
+      if (method === 'POST') {
+        const body = JSON.parse(init.body);
+        const idx = artifacts.findIndex(r => r.owner_id === body.owner_id && r.artifact_id === body.artifact_id);
+        if (idx >= 0) artifacts[idx] = body; else artifacts.push(body);
+        return Response.json([body], { status: 201 });
+      }
+      if (method === 'PATCH') {
+        const idx = artifacts.findIndex(r => r.artifact_id === artId && (!owner || r.owner_id === owner));
+        if (idx < 0) return Response.json([]);
+        const patch = JSON.parse(init.body);
+        artifacts[idx] = { ...artifacts[idx], ...patch };
+        return Response.json([artifacts[idx]]);
+      }
+      return Response.json([]);
+    }],
+    [url => url.startsWith(`${SUPA}/rest/v1/dua_artifact_versions`), (url, init) => {
+      const method = init.method || 'GET';
+      const query = new URL(url).searchParams;
+      const owner = query.get('owner_id')?.replace('eq.', '');
+      const artId = query.get('artifact_id')?.replace('eq.', '');
+
+      if (method === 'GET') {
+        let list = versions.filter(r => (!owner || r.owner_id === owner) && (!artId || r.artifact_id === artId));
+        list.sort((a, b) => b.version_num - a.version_num);
+        if (query.get('limit') === '1') list = list.slice(0, 1);
+        return Response.json(list);
+      }
+      if (method === 'POST') {
+        const body = JSON.parse(init.body);
+        const row = { id: crypto.randomUUID(), created_at: stamp(), ...body };
+        versions.push(row);
+        return Response.json([row], { status: 201 });
+      }
+      return Response.json([]);
+    }],
+  ];
+
+  return { artifacts, versions, routes };
+}
+
+test('Phase 4B: Collaborative Studios — GET /api/artifacts/:id/versions returns version history', async () => {
+  const { artifacts, versions, routes } = studioStore();
+  const fetcher = router(routes);
+
+  // Seed artifact
+  artifacts.push({ owner_id: UID, artifact_id: 'art_doc_1', title: 'Doc 1', type: 'Code', timestamp: 'Today', size_bytes: 100, url: 'file.js', created_at_ms: 1000, updated_at_ms: 1000 });
+  // Seed two versions
+  versions.push(
+    { id: '11111111-0000-0000-0000-000000000001', owner_id: UID, artifact_id: 'art_doc_1', version_num: 1, content: 'const a = 1;', prompt_note: 'Initial', created_at: '2026-11-19T01:00:00Z' },
+    { id: '11111111-0000-0000-0000-000000000002', owner_id: UID, artifact_id: 'art_doc_1', version_num: 2, content: 'const a = 2;', prompt_note: 'Increment', created_at: '2026-11-19T02:00:00Z' }
+  );
+
+  const res = await handleService(call('GET', '/api/artifacts/art_doc_1/versions'), { env, fetcher });
+  assert.equal(res.status, 200);
+  const json = await res.json();
+  assert.equal(json.versions.length, 2);
+  assert.equal(json.versions[0].versionNum, 2);
+  assert.equal(json.versions[0].content, 'const a = 2;');
+  assert.equal(json.versions[1].versionNum, 1);
+});
+
+test('Phase 4B: Collaborative Studios — POST /api/artifacts/:id/revise creates version 1 and version 2, updating size and timestamp', async () => {
+  const { artifacts, versions, routes } = studioStore();
+  const fetcher = router(routes);
+
+  // Seed artifact
+  artifacts.push({ owner_id: UID, artifact_id: 'art_doc_2', title: 'Architecture Document', type: 'Code', timestamp: 'Today', size_bytes: 50, url: null, created_at_ms: 1000, updated_at_ms: 1000 });
+
+  // First revision -> creates version 1
+  const res1 = await handleService(call('POST', '/api/artifacts/art_doc_2/revise', { instruction: 'Add system diagram notes' }), { env, fetcher });
+  assert.equal(res1.status, 201);
+  const json1 = await res1.json();
+  assert.equal(json1.version.versionNum, 1);
+  assert.match(json1.version.content, /Add system diagram notes/);
+  assert.equal(versions.length, 1);
+  assert.equal(artifacts[0].size_bytes > 0, true);
+
+  // Second revision -> creates version 2 based on previous content
+  const res2 = await handleService(call('POST', '/api/artifacts/art_doc_2/revise', { instruction: 'Add database schema' }), { env, fetcher });
+  assert.equal(res2.status, 201);
+  const json2 = await res2.json();
+  assert.equal(json2.version.versionNum, 2);
+  assert.match(json2.version.content, /Add database schema/);
+  assert.equal(versions.length, 2);
+
+  // Check version history lists both in desc order
+  const vList = await handleService(call('GET', '/api/artifacts/art_doc_2/versions'), { env, fetcher });
+  assert.equal(vList.status, 200);
+  const listJson = await vList.json();
+  assert.equal(listJson.versions.length, 2);
+  assert.equal(listJson.versions[0].versionNum, 2);
+  assert.equal(listJson.versions[1].versionNum, 1);
+});
+
+test('Phase 4B: Collaborative Studios — versions and revise return 404 for nonexistent artifact', async () => {
+  const { routes } = studioStore();
+  const fetcher = router(routes);
+
+  const getRes = await handleService(call('GET', '/api/artifacts/art_nonexistent/versions'), { env, fetcher });
+  assert.equal(getRes.status, 404);
+
+  const postRes = await handleService(call('POST', '/api/artifacts/art_nonexistent/revise', { instruction: 'Update' }), { env, fetcher });
+  assert.equal(postRes.status, 404);
+});

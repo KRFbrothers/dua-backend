@@ -172,6 +172,39 @@ For older messages, pass the first message's `createdAt` as `before`. `POST /api
 - Each responding agent commits its own assistant message turn to `dua_messages` tagged with its `agent_id`.
 - `/api/cloud` is unchanged.
 
+### Artifacts and Collaborative Studios (Phase 4B)
+
+Owner-only persistent artifacts and versioned revision history (`dua_artifacts`, `dua_artifact_versions`). The API uses the owner's token and the anon key only. Every response is `Cache-Control: no-store`; errors are `{ "error": "..." }`. `:id` matches `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` (anything else is `404`), wrong methods are `405`, bodies limited to 16 KB.
+
+| Method and path | Request | Response |
+|---|---|---|
+| `GET /api/artifacts` | none | `{ "artifacts": [ artifact ] }`, newest first |
+| `POST /api/artifacts` | `{ "id"?: "art_...", "title": "", "type"?: "", "timestamp"?: "", "sizeBytes"?: 0, "url"?: "" }` | `201` `{ "artifact": artifact }` |
+| `DELETE /api/artifacts/:id` | none | `204`, `404` when not found |
+| `GET /api/artifacts/:id/versions` | none | `{ "versions": [ version ] }`, newest `versionNum` first |
+| `POST /api/artifacts/:id/revise` | `{ "instruction": "Make the header bold and add intro" }` | `201` `{ "artifact": artifact, "version": version }`. Automatically revisions content via AI or fallback and increments `versionNum` |
+
+```json
+{
+  "artifact": {
+    "id": "art_q3_deck",
+    "title": "Q3 Launch Deck",
+    "type": "Webpage",
+    "timestamp": "Today",
+    "sizeBytes": 2411724,
+    "url": "https://static.teamily.ai/sites/demo/q3-deck/index.html"
+  },
+  "version": {
+    "id": "uuid",
+    "artifactId": "art_q3_deck",
+    "versionNum": 2,
+    "content": "Updated artifact content...",
+    "promptNote": "Make the header bold and add intro",
+    "createdAt": "ISO-8601"
+  }
+}
+```
+
 ### Memories (Phase 3 — Universal Living Memory)
 
 Owner-only persistent memory (`dua_memories`). The API uses the owner's token and the anon key only. Every response is `Cache-Control: no-store`; errors are `{ "error": "..." }`. `:id` matches `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` (anything else is `404`), wrong methods are `405`, bodies limited to 16 KB.
@@ -263,6 +296,59 @@ Starter skills are loaded directly from `dua_agent_prompts.json` without requiri
     "isStarter": true,
     "createdAt": null,
     "updatedAt": null
+  }
+}
+```
+
+#### Agent Instructions (Phase 4C — Proactive Agents)
+
+Owner-only instructions for autonomous and proactive agent behavior (`dua_agent_instructions`). `:id` is the agent slug (official or custom), `:instructionId` is a UUID.
+
+| Method and path | Request | Response |
+|---|---|---|
+| `GET /api/agents/:id/instructions` | none | `{ "instructions": [ instruction ] }`, newest first |
+| `POST /api/agents/:id/instructions` | `{ "instruction": "Always respond in concise Kotlin", "isActive"?: true }` | `201` `{ "instruction": instruction }` |
+| `GET /api/agents/:id/instructions/:instructionId` | none | `{ "instruction": instruction }`, `404` when not found |
+| `PUT /api/agents/:id/instructions/:instructionId` | `{ "instruction"?: "...", "isActive"?: false }` | `{ "instruction": instruction }`, `404` when not found |
+| `DELETE /api/agents/:id/instructions/:instructionId` | none | `204`, `404` when not found |
+
+```json
+{
+  "instruction": {
+    "id": "uuid",
+    "agentId": "personal-agent",
+    "instruction": "Always respond in concise Kotlin",
+    "isActive": true,
+    "createdAt": "ISO-8601"
+  }
+}
+```
+
+#### Agent Triggers (Phase 4C — Proactive Agents)
+
+Owner-only proactive execution triggers (`dua_agent_triggers`). `:id` is the agent slug, `:triggerId` is a UUID. Supported trigger types: `schedule`, `webhook`, `missed_summary`.
+
+| Method and path | Request | Response |
+|---|---|---|
+| `GET /api/agents/:id/triggers` | none | `{ "triggers": [ trigger ] }`, newest first |
+| `POST /api/agents/:id/triggers` | `{ "triggerType": "schedule", "cronExpr"?: "0 9 * * 1-5", "prompt": "Morning summary", "conversationId"?: null, "enabled"?: true }` | `201` `{ "trigger": trigger }` |
+| `GET /api/agents/:id/triggers/:triggerId` | none | `{ "trigger": trigger }`, `404` when not found |
+| `PUT /api/agents/:id/triggers/:triggerId` | `{ "triggerType"?: "", "cronExpr"?: "", "prompt"?: "", "conversationId"?: null, "enabled"?: false }` | `{ "trigger": trigger }`, `404` when not found |
+| `DELETE /api/agents/:id/triggers/:triggerId` | none | `204`, `404` when not found |
+| `POST /api/agents/:id/triggers/:triggerId/run` | none | `{ "triggered": true, "trigger": trigger }`. Updates `lastRunAt` timestamp |
+
+```json
+{
+  "trigger": {
+    "id": "uuid",
+    "agentId": "dua-agent",
+    "conversationId": null,
+    "triggerType": "schedule",
+    "cronExpr": "0 9 * * 1-5",
+    "prompt": "Morning summary",
+    "enabled": true,
+    "lastRunAt": "ISO-8601",
+    "createdAt": "ISO-8601"
   }
 }
 ```
