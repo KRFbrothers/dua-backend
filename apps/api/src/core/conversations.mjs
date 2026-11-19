@@ -15,6 +15,7 @@
 //   DELETE /api/conversations/:id                        -> 204
 import { readJsonLimited } from './limited-json.mjs';
 import { resolveOwner, StorageError } from './storage.mjs';
+import { loadPrivacySafeMemories, formatMemories, triggerMemoryAutoExtraction } from './artifacts-memories.mjs';
 
 const noStore = (error, status) => Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
 const ok = (body, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -290,6 +291,19 @@ export async function prepareConversationChat(request, data, { env = process.env
   const conv = convRows[0];
   const agentId = data.agent_id || data.agentId || conv.agent_id || 'personal-agent';
 
+  // Phase 3: inject privacy-safe memories into data.memory for context.
+  // Loads 'global' + 'group:<conversationId>' memories; never leaks other threads.
+  if (base && key) {
+    const memRows = await loadPrivacySafeMemories({
+      base, headers, ownerId: owner.user.id, conversationId, fetcher,
+      signal: request.signal, limit: 10,
+    });
+    const memText = formatMemories(memRows);
+    if (memText) {
+      data.memory = data.memory ? `${data.memory}\n\n${memText}` : memText;
+    }
+  }
+
   const lastUserTurn = data.messages?.at(-1);
   const userContent = lastUserTurn?.text || '';
   const userRow = {
@@ -348,6 +362,15 @@ export async function prepareConversationChat(request, data, { env = process.env
         throw Object.assign(new Error(body.error || `${FEATURE} are temporarily unavailable. Retry.`), { status: failure.status });
       }
       const saved = await saveRes.json().catch(() => null);
+      // Phase 3: trigger background auto-extraction of durable facts from this turn.
+      triggerMemoryAutoExtraction({
+        userText: userContent,
+        assistantText: text,
+        conversationId,
+        owner,
+        env,
+        fetcher,
+      });
       return Array.isArray(saved) ? saved[0] : null;
     },
   };

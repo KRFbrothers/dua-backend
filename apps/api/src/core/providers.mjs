@@ -253,6 +253,9 @@ export async function handleChat(request, { env = process.env, fetcher = fetch, 
     try { conversationChat = await prepareConversationChat(request, data, { env, fetcher }); }
     catch (error) { return json({ error: error.message || 'Conversations storage is temporarily unavailable. Retry.' }, error.status || 502); }
   }
+  // Phase 3 note: global memory injection for standalone /api/chat (no conversation_id) is handled
+  // inside prepareConversationChat for conversation-linked chats. Standalone non-conversation chats
+  // that want global memory should pass it via the data.memory field from the client's cloud snapshot.
   try { await resolveProjectContext(request, data, { env, fetcher, cloud: prepared?.cloud }); }
   catch (error) { return json({ error: error.message || 'Project could not be loaded. Sync and retry.' }, error.status || 502); }
   if (prepared) return savedReplyStream(signal => generateValidatedChat(new Request(request.url, { headers: request.headers, signal }), data, { env, fetcher, pageReader, startedAt }), prepared, { signal: request.signal, startedAt, deadlineAt });

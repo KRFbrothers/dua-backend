@@ -18,7 +18,11 @@ function call(method, path, body, { token = 'user-token', headers = {} } = {}) {
  * It honours the owner filter and the on_conflict upsert the handler relies on,
  * so the tests exercise the real request shapes rather than a stub that agrees
  * with whatever the handler happens to send.
+ * Phase 3: also handles PATCH (scope toggle) and scope/conversation_id query filters.
  */
+const CONV_A = '11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const CONV_B = '22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
 function store(table, idColumn) {
   const rows = [];
   const routes = [[url => url.startsWith(`${SUPA}/rest/v1/${table}`), (url, init) => {
@@ -27,13 +31,35 @@ function store(table, idColumn) {
     const query = new URL(url).searchParams;
     if (method === 'GET') {
       const owner = query.get('owner_id');
-      const list = rows.filter(row => !owner || row.owner_id === owner.replace('eq.', ''));
+      const scopeParam = query.get('scope');
+      const conversationIdParam = query.get('conversation_id');
+      let list = rows.filter(row => !owner || row.owner_id === owner.replace('eq.', ''));
+      // scope=in.(global,group:<id>) filter
+      if (scopeParam && scopeParam.startsWith('in.(')) {
+        const values = scopeParam.slice(4, -1).split(',');
+        list = list.filter(row => values.includes(row.scope ?? 'global'));
+      } else if (scopeParam && scopeParam.startsWith('eq.')) {
+        list = list.filter(row => (row.scope ?? 'global') === scopeParam.slice(3));
+      }
+      // conversation_id filter
+      if (conversationIdParam) {
+        const convId = conversationIdParam.replace('eq.', '');
+        list = list.filter(row => row.source_conversation_id === convId);
+      }
       return Response.json(list);
     }
     if (method === 'POST') {
       const existing = rows.findIndex(row => row.owner_id === body.owner_id && row[idColumn] === body[idColumn]);
       if (existing >= 0) rows[existing] = body; else rows.push(body);
       return Response.json([body], { status: 201 });
+    }
+    if (method === 'PATCH') {
+      const id = query.get(idColumn)?.replace('eq.', '');
+      const owner = query.get('owner_id')?.replace('eq.', '');
+      const idx = rows.findIndex(row => row[idColumn] === id && (!owner || row.owner_id === owner));
+      if (idx < 0) return Response.json([]);
+      rows[idx] = { ...rows[idx], ...body };
+      return Response.json([rows[idx]]);
     }
     if (method === 'DELETE') {
       const id = query.get(`${idColumn}`)?.replace('eq.', '');
@@ -50,7 +76,8 @@ function store(table, idColumn) {
 }
 
 const artifact = { id: 'art_q3_deck', title: 'Q3 Launch Deck', type: 'Webpage', timestamp: 'Aaj', sizeBytes: 2411724, url: 'https://static.teamily.ai/sites/demo/q3-deck/index.html' };
-const memory = { id: 'mem_brand_green', title: 'Brand green is #087C45', summary: 'Never purple or blue.', timestamp: '4 din pehle', category: 'Preference', url: null };
+// Phase 3: memory now includes scope and sourceConversationId.
+const memory = { id: 'mem_brand_green', title: 'Brand green is #087C45', summary: 'Never purple or blue.', timestamp: '4 din pehle', category: 'Preference', url: null, scope: 'global', sourceConversationId: null };
 
 test('artifacts: create, list and delete round-trip through the owner-scoped table', async () => {
   const { rows, routes } = store('dua_artifacts', 'artifact_id');
@@ -194,4 +221,70 @@ test('the database call carries the user token, never a service key', async () =
   const request = fetcher.find(SUPA + '/rest/v1/dua_artifacts')[0];
   assert.equal(request.headers.get('authorization'), 'Bearer user-token');
   assert.equal(request.headers.get('apikey'), env.SUPABASE_ANON_KEY);
+});
+
+// ─── Phase 3: Scope, Privacy Boundaries & PUT /api/memories/:id ──────────────
+
+test('Phase 3: memory is created with default scope=global and sourceConversationId=null', async () => {
+  const { rows, routes } = store('dua_memories', 'memory_id');
+  const fetcher = router(routes);
+  const created = await handleService(call('POST', '/api/memories', memory), { env, fetcher });
+  assert.equal(created.status, 201);
+  const saved = (await created.json()).memory;
+  assert.equal(saved.scope, 'global');
+  assert.equal(saved.sourceConversationId, null);
+});
+
+test('Phase 3: PUT /api/memories/:id toggles scope from global to group:<convId>', async () => {
+  const { rows, routes } = store('dua_memories', 'memory_id');
+  const fetcher = router(routes);
+  // Seed a row
+  rows.push({ memory_id: 'mem_brand_green', owner_id: UID, title: 'Brand green', summary: 'Never purple.', scope: 'global', source_conversation_id: null, timestamp: 'now', category: 'Preference', url: null, created_at_ms: 1, updated_at_ms: 1 });
+  const res = await handleService(call('PUT', `/api/memories/mem_brand_green`, { scope: `group:${CONV_A}` }), { env, fetcher });
+  assert.equal(res.status, 200);
+  const updated = (await res.json()).memory;
+  assert.equal(updated.scope, `group:${CONV_A}`);
+  assert.equal(updated.sourceConversationId, CONV_A);
+});
+
+test('Phase 3: PUT /api/memories/:id toggles scope back to global', async () => {
+  const { rows, routes } = store('dua_memories', 'memory_id');
+  const fetcher = router(routes);
+  rows.push({ memory_id: 'mem_x', owner_id: UID, title: 'X', summary: 'Y', scope: `group:${CONV_A}`, source_conversation_id: CONV_A, timestamp: 'now', category: 'fact', url: null, created_at_ms: 1, updated_at_ms: 1 });
+  const res = await handleService(call('PUT', '/api/memories/mem_x', { scope: 'global', sourceConversationId: null }), { env, fetcher });
+  assert.equal(res.status, 200);
+  const updated = (await res.json()).memory;
+  assert.equal(updated.scope, 'global');
+});
+
+test('Phase 3: PUT /api/memories/:id rejects invalid scope', async () => {
+  const { rows, routes } = store('dua_memories', 'memory_id');
+  const fetcher = router(routes);
+  rows.push({ memory_id: 'mem_x', owner_id: UID, title: 'X', summary: '', scope: 'global', source_conversation_id: null, timestamp: 'now', category: 'fact', url: null, created_at_ms: 1, updated_at_ms: 1 });
+  const res = await handleService(call('PUT', '/api/memories/mem_x', { scope: 'group:not-a-uuid' }), { env, fetcher });
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /scope/i);
+});
+
+test('Phase 3: GET /api/memories?scope=global returns only global memories', async () => {
+  const { rows, routes } = store('dua_memories', 'memory_id');
+  const fetcher = router(routes);
+  rows.push({ memory_id: 'mem_a', owner_id: UID, title: 'A', summary: '', scope: 'global', source_conversation_id: null, timestamp: 'now', category: 'fact', url: null, created_at_ms: 1, updated_at_ms: 1 });
+  rows.push({ memory_id: 'mem_b', owner_id: UID, title: 'B', summary: '', scope: `group:${CONV_A}`, source_conversation_id: CONV_A, timestamp: 'now', category: 'fact', url: null, created_at_ms: 2, updated_at_ms: 2 });
+  const res = await handleService(call('GET', '/api/memories?scope=global'), { env, fetcher });
+  assert.equal(res.status, 200);
+  const list = (await res.json()).memories;
+  assert.equal(list.every(m => m.scope === 'global'), true, 'Only global memories should be returned');
+});
+
+test('Phase 3: privacy boundary — group:<CONV_B> memory never leaks into CONV_A scope query', async () => {
+  const { rows, routes } = store('dua_memories', 'memory_id');
+  const fetcher = router(routes);
+  // Thread B memory
+  rows.push({ memory_id: 'mem_b_secret', owner_id: UID, title: 'Secret B', summary: 'Only for thread B', scope: `group:${CONV_B}`, source_conversation_id: CONV_B, timestamp: 'now', category: 'project', url: null, created_at_ms: 1, updated_at_ms: 1 });
+  // Query for CONV_A scope: should only return global + group:CONV_A
+  const res = await handleService(call('GET', `/api/memories?conversation_id=${CONV_A}`), { env, fetcher });
+  assert.equal(res.status, 200);
+  const list = (await res.json()).memories;
+  assert.equal(list.some(m => m.id === 'mem_b_secret'), false, 'Thread B memory must not appear in Thread A query');
 });
