@@ -164,6 +164,25 @@ shipped behaviour; this file describes the target and the order of work.
   - `POST /api/agents/:id/triggers/:triggerId/run`: triggers manual execution, updating `last_run_at`.
 - **Tests**: comprehensive unit tests in `artifacts-memories.test.mjs` and `agents-skills.test.mjs`, all passing.
 
+### PR I: Cross-Device Supabase Realtime Sync & FCM HTTP v1 Push Notifications (completed)
+
+- **Migration** `202611190006_dua_realtime_push.sql`:
+  - Added `dua_conversations`, `dua_messages`, `dua_agents`, `dua_artifacts`, and `dua_artifact_versions` to `supabase_realtime` publication for cross-device live sync.
+  - Created `dua_device_tokens` table `(id uuid, owner_id uuid, token text, platform text, device_name text, created_at, updated_at)` with unique `(owner_id, token)` and strict owner RLS.
+  - Created `dua_notifications` table `(id uuid, owner_id uuid, conversation_id uuid fk, agent_id text, title text, body text, data jsonb, status text, sent_at, created_at)` with strict owner RLS.
+- **Config & Sync**:
+  - `GET /api/config` exposes `realtime: { enabled: true, tables: [...] }`.
+- **Device & Notification endpoints**:
+  - `POST /api/devices/register`: upserts device token and platform.
+  - `DELETE /api/devices/:token`: deletes device token.
+  - `GET /api/notifications`: lists notifications for owner.
+  - `PUT /api/notifications/:id/read`: marks notification as read.
+- **FCM HTTP v1 Dispatcher**:
+  - Implemented `buildFcmV1Payload`, `sendFcmV1Message`, and `dispatchPushNotification` targeting `https://fcm.googleapis.com/v1/projects/${FCM_PROJECT_ID}/messages:send` via OAuth2.
+  - Integrated with proactive triggers (`POST /api/agents/:id/triggers/:triggerId/run`) to record notifications and trigger push.
+  - Graceful fallback when FCM is not configured in local testing.
+- **Tests**: comprehensive unit tests in `notifications.test.mjs` (8/8 passing) and verify-rls (24 tables).
+
 ## 4. Out of scope until separately approved
 
 - Running `db push` or any deploy.

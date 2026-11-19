@@ -89,7 +89,7 @@ Cloud snapshot JSON is `format: "dua-cloud-snapshot"`, `version: 1`, plus `chats
 | Method and path | Request | Response |
 |---|---|---|
 | `GET /api/setup` | none, or owner session / `X-Dua-App-Token` | Anonymous: `{ "configured": { "providers": 0, "search": false, "sync": false, "memory": true, "connectors": false, "computer": true, "imagine": false, "voice": false }, "account": { "configured": false, "deletionConfigured": false, "requireLogin": false, "ownerRestricted": false, "dailyRequestLimit": 0 } }`. Owner: the full `{ "providers": [], "account": {}, "search": {}, "advanced": {}, "files": {}, "imagine": {}, "voice": {}, "groups": [] }` inventory. |
-| `GET /api/config` | none | `{ "geminiConfigured": false, "model": "", "providers": [], "web": {}, "streaming": true, "personalization": { "personality": true }, "files": {}, "context": {}, "imagine": {}, "voice": {}, "switches": {}, "history": {}, "code": {}, "build": {}, "projects": {} }` |
+| `GET /api/config` | none | `{ "geminiConfigured": false, "model": "", "providers": [], "web": {}, "streaming": true, "personalization": { "personality": true }, "files": {}, "context": {}, "imagine": {}, "voice": {}, "switches": {}, "history": {}, "realtime": { "enabled": true, "tables": [] }, "code": {}, "build": {}, "projects": {} }` |
 
 `switches` is `{ "agent": false, "imagine": false, "voice": false, "maintenance": { "enabled": false } }`.
 
@@ -352,6 +352,55 @@ Owner-only proactive execution triggers (`dua_agent_triggers`). `:id` is the age
   }
 }
 ```
+
+### Devices and Push Notifications (Phase 5B)
+
+Owner-only device token registration and notification management (`dua_device_tokens`, `dua_notifications`). The API uses the owner's token and the anon key only. Every response is `Cache-Control: no-store`; errors are `{ "error": "..." }`.
+
+#### Supabase Realtime Channels (Phase 5A)
+Cross-device live sync is enabled via `supabase_realtime` publication for:
+- `dua_conversations`
+- `dua_messages`
+- `dua_agents`
+- `dua_artifacts`
+- `dua_artifact_versions`
+
+Clients subscribe using standard Supabase client channels: `supabase.channel('public:<table_name>').on('postgres_changes', ...)`. Supabase enforces Row Level Security (`owner_id = (select auth.uid())`) on every Realtime event stream.
+
+#### Endpoints
+
+| Method and path | Request | Response |
+|---|---|---|
+| `POST /api/devices/register` | `{ "token": "fcm_token_...", "platform": "android"\|"web", "deviceName"?: "" }` | `200` `{ "device": device }`. Upserts on conflict `(owner_id, token)` |
+| `DELETE /api/devices/:token` | none | `204`, deletes token |
+| `GET /api/notifications` | none | `{ "notifications": [ notification ] }`, newest first (limit 100) |
+| `PUT /api/notifications/:id/read` | none | `{ "notification": notification }`, updates status to `"read"` |
+
+```json
+{
+  "device": {
+    "id": "uuid",
+    "token": "fcm_token_...",
+    "platform": "android",
+    "deviceName": "Realme 14 Pro+ 5G",
+    "createdAt": "ISO-8601",
+    "updatedAt": "ISO-8601"
+  },
+  "notification": {
+    "id": "uuid",
+    "conversationId": null,
+    "agentId": "dua-agent",
+    "title": "Daily Summary Ready",
+    "body": "Your automated morning summary has finished.",
+    "data": { "triggerType": "schedule" },
+    "status": "sent",
+    "sentAt": "ISO-8601",
+    "createdAt": "ISO-8601"
+  }
+}
+```
+
+Push notifications are dispatched via **FCM HTTP v1** (`https://fcm.googleapis.com/v1/projects/${FCM_PROJECT_ID}/messages:send`) using Google OAuth2 credentials. The legacy FCM endpoint (`fcm.googleapis.com/fcm/send`) is strictly prohibited and never used.
 
 ### Orhan tasks
 

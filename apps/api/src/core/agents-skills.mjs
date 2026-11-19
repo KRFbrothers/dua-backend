@@ -14,6 +14,7 @@ import { readJsonLimited } from './limited-json.mjs';
 import { resolveOwner, StorageError } from './storage.mjs';
 import { guardChatAccess } from './access-policy.mjs';
 import { buildRequest, extractReply } from './adapters.mjs';
+import { dispatchPushNotification } from './notifications.mjs';
 
 const noStore = (error, status) => Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
 const ok = (body, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -552,6 +553,33 @@ export async function handleAgentsSkills(request, { env = process.env, fetcher =
             if (!response.ok) return upstreamFailure(response.status, 'Triggers');
             const rows = await rowsOf(response);
             if (!rows || !rows.length) return noStore('That trigger was not found.', 404);
+
+            // Record notification and dispatch push notification asynchronously
+            const notifRow = {
+              owner_id: owner.user.id,
+              conversation_id: rows[0].conversation_id || null,
+              agent_id: agentId,
+              title: `Proactive Trigger: ${agentId}`,
+              body: rows[0].prompt || 'Trigger executed',
+              data: { triggerId, triggerType: rows[0].trigger_type },
+              status: 'sent',
+              sent_at: now,
+              created_at: now,
+            };
+            db('dua_notifications', '?select=*', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+              body: JSON.stringify(notifRow),
+            }).catch(() => {});
+
+            dispatchPushNotification({
+              ownerId: owner.user.id,
+              ownerToken: owner.token,
+              notification: notifRow,
+              env,
+              fetcher,
+            }).catch(() => {});
+
             return ok({ triggered: true, trigger: presentTrigger(rows[0]) });
           }
 
