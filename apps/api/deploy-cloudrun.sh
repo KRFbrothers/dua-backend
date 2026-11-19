@@ -28,8 +28,9 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregi
 # entries are supported too. PORT is supplied by Cloud Run; login/deadline are set below.
 declare -A secret_names=()
 # Capture the command status: process substitution would hide list failures.
-available_secrets="$(gcloud secrets list --project "$PROJECT_ID" --format='value(name)')"
+available_secrets="$(gcloud secrets list --project "$PROJECT_ID" --format='value(name)' | tr -d '\r')"
 while IFS= read -r name; do
+  name="${name%$'\r'}"
   [[ -n "$name" ]] && secret_names["${name##*/}"]=1
 done <<< "$available_secrets"
 for required in SUPABASE_URL SUPABASE_ANON_KEY DUA_ALLOWED_EMAIL; do
@@ -71,8 +72,9 @@ while IFS= read -r line; do
     if is_kill_switch "$name"; then continue; fi
     if [[ -v "secret_names[$name]" ]]; then
       # Pin a version so instances of one revision cannot silently load different values.
-      version="$(gcloud secrets versions list "$name" --project "$PROJECT_ID" --filter='state=ENABLED' --sort-by='~createTime' --limit=1 --format='value(name)')"
+      version="$(gcloud secrets versions list "$name" --project "$PROJECT_ID" --filter='state=ENABLED' --sort-by='~createTime' --limit=1 --format='value(name)' | tr -d '\r')"
       version="${version##*/}"
+      version="${version%$'\r'}"
       if [[ ! "$version" =~ ^[0-9]+$ ]]; then
         echo "Secret $name needs an enabled version before deployment." >&2
         exit 1
