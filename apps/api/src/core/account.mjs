@@ -1,6 +1,6 @@
 import { ownsPath } from './file-types.mjs';
 import { validateCloudSnapshot } from './cloud-snapshot.mjs';
-import { requestOriginAllowed } from './cors.mjs';
+import { requestOriginAllowed, allowedWebOrigins } from './cors.mjs';
 const cookieNames={access:'dua_access',refresh:'dua_refresh'};
 function configuration(env){
  const url=String(env.url||'').replace(/\/$/,'');const key=env.key;
@@ -65,12 +65,36 @@ export async function handleAccount(req,env={}){
  }
  try{
   if(url.pathname==='/api/account/session'&&req.method==='GET')return json({configured:true,user:await authenticated()});
-  if(url.pathname==='/api/account/features'&&req.method==='GET')return json({passwordReset:false,emailAuth:!!owner,accountDeletion:!!privilegedKey(env.serviceRoleKey)});
+  if(url.pathname==='/api/account/features'&&req.method==='GET')return json({passwordReset:true,emailAuth:!!owner,accountDeletion:!!privilegedKey(env.serviceRoleKey)});
   if(!['POST','PUT','DELETE'].includes(req.method))return json({error:'Method not allowed.'},405);
   if(owner===null&&url.pathname!=='/api/account/logout')return json({error:'Allowed account email setup is invalid.'},503);
   if(!(req.headers.get('content-type')||'').startsWith('application/json'))return json({error:'Use JSON.'},415);
   const raw=await req.text();if(Buffer.byteLength(raw)> (url.pathname==='/api/cloud'?4*1024*1024+1024:16384))return json({error:'Request too large.'},413);
   let body;try{body=JSON.parse(raw||'{}');}catch{return json({error:'Invalid request.'},400);}if(!body||typeof body!=='object'||Array.isArray(body))return json({error:'Invalid request.'},400);
+  if(['/api/account/reset-password','/api/auth/reset-password'].includes(url.pathname)){
+   if(req.method!=='POST')return json({error:'Method not allowed.'},405);
+   if(!owner)return json({error:'Configure the owner email before using password reset.'},503);
+   const email=typeof body.email==='string'?body.email.trim().toLowerCase():'';
+   if(!email||email.length>254||ownerEmail(email)!==email)return json({error:'Enter a valid email address.'},400);
+   if(email!==owner)return ownerDenied();
+   const redirectTarget=body.redirectTo||body.redirect_to;
+   if(redirectTarget!==undefined){
+    if(typeof redirectTarget!=='string'||!redirectTarget.trim()||redirectTarget.length>2048)return json({error:'Invalid redirect URL.'},400);
+    let parsedUrl;try{parsedUrl=new URL(redirectTarget);}catch{return json({error:'Invalid redirect URL.'},400);}
+    if(!['https:','http:'].includes(parsedUrl.protocol))return json({error:'Redirect URL must use http or https.'},400);
+    const allowed=allowedWebOrigins(env);
+    if(parsedUrl.origin!==url.origin&&!allowed.has(parsedUrl.origin))return json({error:'Redirect URL is not allowed.'},400);
+   }
+   const recoverBody={email};
+   if(redirectTarget)recoverBody.redirect_to=redirectTarget;
+   const query=redirectTarget?'?redirect_to='+encodeURIComponent(redirectTarget):'';
+   const result=await request('/auth/v1/recover'+query,'POST',recoverBody);
+   if(!result.response.ok){
+    const msg=result.data?.msg||result.data?.message||result.data?.error_description||'Password reset request failed. Try again later.';
+    return json({error:msg,retryAfter:result.response.status===429?60:undefined},result.response.status===429?429:400);
+   }
+   return json({ok:true,message:'Password reset email sent.'});
+  }
   const emailAction=['/api/account/email-login','/api/account/email-signup','/api/account/password'].includes(url.pathname);
   if(emailAction){
    // The Dua AI website (served by dua-api itself) may sign in with email + password: only a

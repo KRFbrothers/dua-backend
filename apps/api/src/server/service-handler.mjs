@@ -56,7 +56,7 @@ async function routeService(request,{env=process.env,fetcher=fetch}={}) {
  if(path==='/api/setup')return handleSetup(request,{env,fetcher});
  if(path==='/api/config')return handleChat(request,{env,fetcher});
  // Account and cloud routes: owner-locked by DUA_ALLOWED_EMAIL inside handleAccount (session, features and logout stay open).
- if(path==='/api/cloud'||path==='/api/cloud/chat'||/^\/api\/account\/(session|refresh|logout|features|google-token|email-login|email-signup|password|phone|delete)$/.test(path)) {
+ if(path==='/api/auth/reset-password'||path==='/api/cloud'||path==='/api/cloud/chat'||/^\/api\/account\/(session|refresh|logout|features|google-token|email-login|email-signup|password|reset-password|phone|delete)$/.test(path)) {
   const handler=path==='/api/cloud'&&request.method==='GET'?handleCloudRead:handleAccount;
   return handler(request,{url:env.SUPABASE_URL,key:env.SUPABASE_ANON_KEY,serviceRoleKey:env.SUPABASE_SERVICE_ROLE_KEY,filesBucket:env.DUA_FILES_BUCKET,allowedEmail:env.DUA_ALLOWED_EMAIL,webOrigins:env.WEB_ORIGINS,fetcher});
  }
