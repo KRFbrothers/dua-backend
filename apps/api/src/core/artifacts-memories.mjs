@@ -19,7 +19,7 @@ import { readJsonLimited } from './limited-json.mjs';
 import { resolveOwner, StorageError } from './storage.mjs';
 
 const noStore = (error, status) => Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
-const ok = body => Response.json(body, { headers: { 'Cache-Control': 'no-store' } });
+const ok = (body, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 
 // The app's ids are opaque strings it generates; keep them to a safe path segment
 // so an id can never change the URL's structure or reach another row.
@@ -171,10 +171,15 @@ function upstreamFailure(status) {
 export async function handleArtifactsMemories(request, { env = process.env, fetcher = fetch } = {}) {
   const parts = new URL(request.url).pathname.split('/').filter(Boolean);
   const resource = RESOURCES[parts[1]];
-  if (parts[0] !== 'api' || !resource || parts.length > 3) return noStore('Not found.', 404);
+  if (parts[0] !== 'api' || !resource || parts.length > 4) return noStore('Not found.', 404);
   const id = parts[2] || '';
-  if (parts.length === 3 && !ID.test(id)) return noStore('Not found.', 404);
-  const allowed = parts.length === 2 ? ['GET', 'POST'] : (resource.table === 'dua_memories' ? ['DELETE', 'PUT'] : ['DELETE']);
+  const action = parts[3] || '';
+  if (parts.length >= 3 && !ID.test(id)) return noStore('Not found.', 404);
+  if (parts.length === 4 && (parts[1] !== 'artifacts' || !['versions', 'revise'].includes(action))) return noStore('Not found.', 404);
+
+  const allowed = parts.length === 2 ? ['GET', 'POST'] :
+    parts.length === 3 ? (resource.table === 'dua_memories' ? ['DELETE', 'PUT'] : ['DELETE']) :
+    (action === 'versions' ? ['GET'] : ['POST']);
   if (!allowed.includes(request.method)) return noStore('Method not allowed.', 405);
 
   let owner;
@@ -197,6 +202,131 @@ export async function handleArtifactsMemories(request, { env = process.env, fetc
   });
 
   try {
+    if (parts.length === 4 && parts[1] === 'artifacts') {
+      // 1. Verify artifact exists
+      const artRes = await db(`?artifact_id=eq.${encodeURIComponent(id)}&owner_id=eq.${encodeURIComponent(owner.user.id)}&limit=1`, { method: 'GET' });
+      if (!artRes.ok) return upstreamFailure(artRes.status);
+      const artRows = await artRes.json().catch(() => []);
+      if (!Array.isArray(artRows) || artRows.length === 0) return noStore('That item was not found.', 404);
+      const currentArtifact = artRows[0];
+
+      if (action === 'versions' && request.method === 'GET') {
+        const vRes = await fetcher(`${base}/rest/v1/dua_artifact_versions?select=id,artifact_id,version_num,content,prompt_note,created_at&artifact_id=eq.${encodeURIComponent(id)}&owner_id=eq.${encodeURIComponent(owner.user.id)}&order=version_num.desc`, {
+          method: 'GET',
+          headers,
+          redirect: 'error',
+          signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]),
+        });
+        if (!vRes.ok) return upstreamFailure(vRes.status);
+        const vRows = await vRes.json().catch(() => []);
+        if (!Array.isArray(vRows)) return noStore('Artifact versions returned an invalid list.', 502);
+        return ok({
+          versions: vRows.map(r => ({
+            id: r.id,
+            artifactId: r.artifact_id,
+            versionNum: r.version_num,
+            content: r.content,
+            promptNote: r.prompt_note,
+            createdAt: r.created_at,
+          })),
+        });
+      }
+
+      if (action === 'revise' && request.method === 'POST') {
+        let data;
+        try { data = await readJsonLimited(request, MAX_BODY); }
+        catch (error) { return noStore(error.status === 413 ? 'This request is too large.' : 'Invalid request.', error.status || 400); }
+        if (!data || typeof data !== 'object' || Array.isArray(data)) return noStore('Invalid request.', 400);
+        const instruction = typeof data.instruction === 'string' ? data.instruction.trim() : '';
+        if (!instruction || instruction.length > 5000) return noStore('Invalid instruction.', 400);
+
+        // Fetch latest version
+        const latestRes = await fetcher(`${base}/rest/v1/dua_artifact_versions?select=version_num,content&artifact_id=eq.${encodeURIComponent(id)}&owner_id=eq.${encodeURIComponent(owner.user.id)}&order=version_num.desc&limit=1`, {
+          method: 'GET',
+          headers,
+          redirect: 'error',
+          signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]),
+        });
+        const latestRows = latestRes.ok ? await latestRes.json().catch(() => []) : [];
+        const latestRow = Array.isArray(latestRows) && latestRows.length > 0 ? latestRows[0] : null;
+        const currentVersion = latestRow ? latestRow.version_num : 0;
+        const currentContent = latestRow ? latestRow.content : `${currentArtifact.title}\n${currentArtifact.url || ''}`;
+        const nextVersion = currentVersion + 1;
+
+        // Perform revision via AI or fallback
+        let revisedContent = '';
+        if (env.GEMINI_API_KEY) {
+          const model = env.GEMINI_MODEL || 'gemini-3.8-flash';
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+          const prompt = `You are an AI artifact editor in a collaborative studio.\n\nCurrent Content:\n${currentContent}\n\nRevision Instruction: ${instruction}\n\nGenerate the complete revised content for this artifact. Return ONLY the revised content without any introductory or conversational remarks.`;
+          try {
+            const geminiRes = await fetcher(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ role: 'user', parts: [{ text: prompt }] }],
+                generationConfig: { maxOutputTokens: 8192, temperature: 0.3 },
+              }),
+              signal: AbortSignal.any([request.signal, AbortSignal.timeout(30000)]),
+            });
+            if (geminiRes.ok) {
+              const gJson = await geminiRes.json().catch(() => null);
+              revisedContent = gJson?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            }
+          } catch {}
+        }
+        if (!revisedContent.trim()) {
+          revisedContent = `${currentContent}\n\n<!-- Revised with: ${instruction} -->\nUpdated content.`;
+        }
+
+        // Save new version
+        const versionRow = {
+          artifact_id: id,
+          owner_id: owner.user.id,
+          version_num: nextVersion,
+          content: revisedContent,
+          prompt_note: instruction,
+        };
+        const saveVRes = await fetcher(`${base}/rest/v1/dua_artifact_versions`, {
+          method: 'POST',
+          headers: {
+            ...headers,
+            'Content-Type': 'application/json',
+            Prefer: 'return=representation',
+          },
+          body: JSON.stringify(versionRow),
+          redirect: 'error',
+          signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]),
+        });
+        if (!saveVRes.ok) return upstreamFailure(saveVRes.status);
+        const savedV = (await saveVRes.json().catch(() => []))?.[0];
+        if (!savedV) return noStore('Failed to save artifact version.', 502);
+
+        // Update artifact updated_at_ms and size_bytes
+        const patchArtRes = await db(`?artifact_id=eq.${encodeURIComponent(id)}&owner_id=eq.${encodeURIComponent(owner.user.id)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
+          body: JSON.stringify({
+            updated_at_ms: Date.now(),
+            size_bytes: Buffer.byteLength(revisedContent, 'utf8'),
+          }),
+        });
+        const updatedArt = (await patchArtRes.json().catch(() => []))?.[0] || currentArtifact;
+
+        return ok({
+          artifact: resource.present(updatedArt),
+          version: {
+            id: savedV.id,
+            artifactId: savedV.artifact_id,
+            versionNum: savedV.version_num,
+            content: savedV.content,
+            promptNote: savedV.prompt_note,
+            createdAt: savedV.created_at,
+          },
+        }, 201);
+      }
+    }
+
     if (request.method === 'GET') {
       const url = new URL(request.url);
       let filter = `order=updated_at_ms.desc&limit=${LIST_LIMIT}`;

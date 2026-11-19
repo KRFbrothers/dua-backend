@@ -141,6 +141,29 @@ shipped behaviour; this file describes the target and the order of work.
   - Each responding agent commits its own assistant message turn to `dua_messages` tagged with its `agent_id`.
 - **Tests**: comprehensive unit tests in `conversations.test.mjs` for `@mention` parsing, `/api/conversations/:id/agents` CRUD, tagged streaming execution, and multi-agent reply persistence.
 
+### PR H: Collaborative Studios & Proactive Agent Triggers (completed)
+
+- **Migration** `202611190005_dua_studios_triggers.sql`: created 3 tables with strict owner RLS (`owner_id = (select auth.uid())`):
+  - `dua_artifact_versions`: `(id uuid, owner_id uuid, artifact_id text, version_num int, content text, prompt_note text, created_at timestamptz)`, unique `(owner_id, artifact_id, version_num)`, foreign key referencing `dua_artifacts`.
+  - `dua_agent_instructions`: `(id uuid, owner_id uuid, agent_id text, instruction text, is_active bool, created_at timestamptz)`.
+  - `dua_agent_triggers`: `(id uuid, owner_id uuid, agent_id text, conversation_id uuid fk, trigger_type text, cron_expr text, prompt text, enabled bool, last_run_at timestamptz, created_at timestamptz)`.
+- **Collaborative Studios endpoints**:
+  - `GET /api/artifacts/:id/versions`: lists artifact version history ordered by `version_num desc`.
+  - `POST /api/artifacts/:id/revise`: accepts `{ instruction }`, uses Gemini or fallback to revise artifact content, creates incremental version record in `dua_artifact_versions`, and updates artifact timestamp and byte size.
+- **Proactive Agents endpoints**:
+  - `GET /api/agents/:id/instructions`: lists instructions for an agent.
+  - `POST /api/agents/:id/instructions`: creates an instruction (`{ instruction, isActive }`).
+  - `GET /api/agents/:id/instructions/:instructionId`: returns a single instruction.
+  - `PUT /api/agents/:id/instructions/:instructionId`: updates instruction text or active status.
+  - `DELETE /api/agents/:id/instructions/:instructionId`: deletes an instruction.
+  - `GET /api/agents/:id/triggers`: lists triggers for an agent.
+  - `POST /api/agents/:id/triggers`: creates a trigger (`schedule`, `webhook`, `missed_summary`).
+  - `GET /api/agents/:id/triggers/:triggerId`: returns a single trigger.
+  - `PUT /api/agents/:id/triggers/:triggerId`: updates trigger fields.
+  - `DELETE /api/agents/:id/triggers/:triggerId`: deletes a trigger.
+  - `POST /api/agents/:id/triggers/:triggerId/run`: triggers manual execution, updating `last_run_at`.
+- **Tests**: comprehensive unit tests in `artifacts-memories.test.mjs` and `agents-skills.test.mjs`, all passing.
+
 ## 4. Out of scope until separately approved
 
 - Running `db push` or any deploy.
