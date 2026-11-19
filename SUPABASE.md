@@ -46,7 +46,7 @@ After that approval, the sequence is:
 
 Use Node 24+ from `apps/api/` with `SUPABASE_URL` and `SUPABASE_ANON_KEY` (or `SUPABASE_PUBLISHABLE_KEY`) exported, then run `npm run verify:rls`. For an ignored local `.env` instead, run `node --env-file-if-exists=.env scripts/verify-rls.mjs`. Do not use a user access token, secret key or service-role key. The URL must be the project root, not `/rest/v1/`. Missing credentials print a helpful SKIP and exit 0; configuration, network and unverified access results exit 1. The script never prints keys or returned row contents.
 
-The default table list is every table created by `supabase/migrations/` (18 tables: `dua_cloud_snapshots`, `dua_daily_usage`, `dua_imagine_usage`, `dua_voice_usage`, `dua_voice_sessions`, `agent_notes`, `dua_workflow_runs`, `dua_workflow_executions`, `dua_workflow_credentials`, `dua_workflow_automation`, `dua_workflow_deliveries`, `dua_orhan_tasks`, `dua_artifacts`, `dua_memories`, `dua_conversations`, `dua_messages`, `dua_agents`, `dua_agent_skills`). Running `npm run verify:rls` with no arguments checks all of them:
+The default table list is every table created by `supabase/migrations/` (19 tables: `dua_cloud_snapshots`, `dua_daily_usage`, `dua_imagine_usage`, `dua_voice_usage`, `dua_voice_sessions`, `agent_notes`, `dua_workflow_runs`, `dua_workflow_executions`, `dua_workflow_credentials`, `dua_workflow_automation`, `dua_workflow_deliveries`, `dua_orhan_tasks`, `dua_artifacts`, `dua_memories`, `dua_conversations`, `dua_messages`, `dua_agents`, `dua_agent_skills`, `dua_conversation_agents`). Running `npm run verify:rls` with no arguments checks all of them:
 
 ```sh
 cd apps/api

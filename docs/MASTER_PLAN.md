@@ -126,6 +126,21 @@ shipped behaviour; this file describes the target and the order of work.
 - **Background auto-extraction** (`triggerMemoryAutoExtraction`): non-blocking `queueMicrotask` after each assistant reply. Calls Gemini to extract 0–2 durable facts, filters secrets with `SECRET_PATTERNS`, saves as `global` or `group:<conversation_id>`. Skipped silently if `DISABLE_MEMORY_EXTRACTION=1` or Gemini key missing.
 - **Tests**: 6 new Phase 3 tests in `artifacts-memories.test.mjs` covering scope defaults, PUT toggle, invalid scope rejection, `?scope=global` filter, and cross-thread privacy boundary.
 
+### PR G: Multi-Agent Group Chat & @mention (completed)
+
+- **Migration** `202611190004_dua_conversation_agents.sql`: created `dua_conversation_agents` table `(conversation_id uuid, agent_id text, owner_id uuid, added_at timestamptz)` with primary key `(conversation_id, agent_id)`, owner RLS policies and index.
+- **Group membership endpoints**:
+  - `GET /api/conversations/:id/agents`: lists agents assigned to a conversation.
+  - `POST /api/conversations/:id/agents`: assigns an official or verified custom agent to a conversation.
+  - `DELETE /api/conversations/:id/agents/:agentId`: removes an agent from a conversation.
+- **@mention parser** (`parseMentions`): extracts `@agent-id` and `@AgentName` from user turn, matching case-insensitively and ignoring punctuation/emails.
+- **Parallel multi-agent execution**:
+  - When specific agents are `@mention`ed (or a group thread has multiple assigned agents), all targeted agents execute concurrently in parallel via `Promise.allSettled`.
+  - Each agent's custom system prompt / personality is injected into its generation.
+  - SSE stream events are tagged with `agentId` and `agentName` (`type: 'text'`, `type: 'agent_done'`).
+  - Each responding agent commits its own assistant message turn to `dua_messages` tagged with its `agent_id`.
+- **Tests**: comprehensive unit tests in `conversations.test.mjs` for `@mention` parsing, `/api/conversations/:id/agents` CRUD, tagged streaming execution, and multi-agent reply persistence.
+
 ## 4. Out of scope until separately approved
 
 - Running `db push` or any deploy.

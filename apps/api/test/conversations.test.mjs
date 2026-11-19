@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleService } from '../src/server/service-handler.mjs';
-import { searchPattern } from '../src/core/conversations.mjs';
+import { searchPattern, parseMentions } from '../src/core/conversations.mjs';
 import { validateChat } from '../src/core/providers.mjs';
 import { filesEnv, router, SUPA, UID, OTHER } from './files-helpers.mjs';
 import { readEvents, sseResponse, sse } from './helpers.mjs';
@@ -39,13 +39,15 @@ function ilike(pattern) {
 function database() {
   const conversations = [];
   const messages = [];
+  const conversationAgents = [];
+  const customAgents = [];
   let clock = Date.parse('2026-11-19T00:00:00Z');
   const stamp = () => new Date(clock += 1000).toISOString().replace('Z', '+00:00');
   const ownerOf = init => new Headers(init.headers).get('authorization') === 'Bearer user-token' ? UID : 'nobody';
   const eq = (query, name) => query.get(name)?.replace(/^eq\./, '');
   const filter = (rows, query, owner) => rows.filter(row => {
     if (row.owner_id !== owner) return false;
-    for (const name of ['id', 'owner_id', 'conversation_id']) if (query.has(name) && row[name] !== eq(query, name)) return false;
+    for (const name of ['id', 'owner_id', 'conversation_id', 'agent_id']) if (query.has(name) && row[name] !== eq(query, name)) return false;
     if (query.has('title') && !ilike(query.get('title').replace(/^ilike\./, '')).test(row.title)) return false;
     if (query.has('created_at') && !(row.created_at < query.get('created_at').replace(/^lt\./, ''))) return false;
     return true;
@@ -66,11 +68,16 @@ function database() {
     const offset = Number(query.get('offset') || 0);
     return query.has('limit') ? rows.slice(offset, offset + Number(query.get('limit'))) : rows.slice(offset);
   };
-  const tables = { dua_conversations: conversations, dua_messages: messages };
+  const tables = {
+    dua_conversations: conversations,
+    dua_messages: messages,
+    dua_conversation_agents: conversationAgents,
+    dua_agents: customAgents,
+  };
   const routes = [[url => url.startsWith(`${SUPA}/rest/v1/`), (url, init) => {
     const parsed = new URL(url);
     const table = parsed.pathname.split('/').pop();
-    const rows = tables[table];
+    const rows = tables[table] || [];
     const query = parsed.searchParams;
     const owner = ownerOf(init);
     const method = init.method || 'GET';
@@ -78,6 +85,16 @@ function database() {
     if (method === 'POST') {
       const body = JSON.parse(init.body);
       if (body.owner_id !== owner) return Response.json({ message: 'row-level security' }, { status: 403 });
+      if (table === 'dua_conversation_agents') {
+        const existing = conversationAgents.find(r => r.conversation_id === body.conversation_id && r.agent_id === body.agent_id && r.owner_id === body.owner_id);
+        if (existing) {
+          if (/ignore-duplicates/.test(new Headers(init.headers).get('prefer'))) return Response.json([], { status: 201 });
+          return Response.json({ message: 'duplicate' }, { status: 409 });
+        }
+        const row = { conversation_id: body.conversation_id, agent_id: body.agent_id, owner_id: body.owner_id, added_at: stamp() };
+        conversationAgents.push(row);
+        return Response.json([row], { status: 201 });
+      }
       const row = { id: body.id || crypto.randomUUID(), agent_id: 'dua-agent', title: 'New chat', pinned: false,
         last_message_preview: '', last_message_at: stamp(), created_at: stamp(), ...body };
       if (rows.some(existing => existing.id === row.id)) {
@@ -103,7 +120,10 @@ function database() {
       const removed = filter(rows, query, owner);
       for (const row of removed) {
         rows.splice(rows.indexOf(row), 1);
-        for (let i = messages.length - 1; i >= 0; i--) if (messages[i].conversation_id === row.id) messages.splice(i, 1);
+        if (table === 'dua_conversations') {
+          for (let i = messages.length - 1; i >= 0; i--) if (messages[i].conversation_id === row.id) messages.splice(i, 1);
+          for (let i = conversationAgents.length - 1; i >= 0; i--) if (conversationAgents[i].conversation_id === row.id) conversationAgents.splice(i, 1);
+        }
       }
       return Response.json(removed);
     }
@@ -121,7 +141,12 @@ function database() {
     messages.push(row);
     return row;
   };
-  return { conversations, messages, routes, addConversation, addMessage };
+  const addConversationAgent = (conversationId, agentId) => {
+    const row = { conversation_id: conversationId, agent_id: agentId, owner_id: UID, added_at: stamp() };
+    conversationAgents.push(row);
+    return row;
+  };
+  return { conversations, messages, conversationAgents, customAgents, routes, addConversation, addMessage, addConversationAgent };
 }
 
 test('conversations: create, list, pin and delete round-trip with the documented shapes', async () => {
@@ -514,4 +539,180 @@ test('POST /api/chat stream failure keeps user message but skips assistant messa
   assert.equal(db.messages.length, 1);
   assert.equal(db.messages[0].role, 'user');
   assert.equal(db.messages[0].content, 'Will this fail?');
+});
+
+// ─── Phase 4A: Multi-Agent Group Chat & @mention Tests ───────────────────────
+
+test('Phase 4A: parseMentions correctly extracts agent IDs and names', () => {
+  const candidates = [
+    { id: 'personal-agent', name: 'Personal Agent' },
+    { id: 'dua-agent', name: 'Dua Agent' },
+    { id: 'code-assistant', name: 'Code Assistant' },
+    { id: 'frontend-dev', name: 'Frontend Developer' },
+  ];
+
+  // Matches @slug and @Name case-insensitively
+  const r1 = parseMentions('Hello @personal-agent and @CodeAssistant please review', candidates);
+  assert.equal(r1.length, 2);
+  assert.equal(r1[0].id, 'personal-agent');
+  assert.equal(r1[1].id, 'code-assistant');
+
+  // Matches @Name without hyphens/spaces
+  const r2 = parseMentions('Can @FrontendDeveloper build this UI?', candidates);
+  assert.equal(r2.length, 1);
+  assert.equal(r2[0].id, 'frontend-dev');
+
+  // Ignores email addresses (preceded by alphanumeric chars)
+  const r3 = parseMentions('Send feedback to test@example.com or ping @dua-agent', candidates);
+  assert.equal(r3.length, 1);
+  assert.equal(r3[0].id, 'dua-agent');
+
+  // Deduplicates repeated mentions
+  const r4 = parseMentions('@dua-agent hello @dua-agent are you there?', candidates);
+  assert.equal(r4.length, 1);
+  assert.equal(r4[0].id, 'dua-agent');
+
+  // Unmatched mention returns empty
+  const r5 = parseMentions('Hello @unknown-agent', candidates);
+  assert.equal(r5.length, 0);
+
+  // No @mention returns empty
+  assert.deepEqual(parseMentions('Plain message without tags', candidates), []);
+});
+
+test('Phase 4A: /api/conversations/:id/agents CRUD round-trip', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C1 });
+  const fetcher = router(db.routes);
+
+  // 1. Initial list is empty
+  const emptyRes = await handleService(call('GET', `/api/conversations/${conv.id}/agents`), { env, fetcher });
+  assert.equal(emptyRes.status, 200);
+  assert.deepEqual((await emptyRes.json()).agents, []);
+
+  // 2. Add an official agent
+  const addRes1 = await handleService(call('POST', `/api/conversations/${conv.id}/agents`, { agentId: 'personal-agent' }), { env, fetcher });
+  assert.equal(addRes1.status, 201);
+  const { agent: agent1 } = await addRes1.json();
+  assert.equal(agent1.agentId, 'personal-agent');
+  assert.equal(agent1.conversationId, conv.id);
+
+  // 3. Add a custom agent that exists in dua_agents
+  db.customAgents.push({ id: 'code-helper', owner_id: UID, name: 'Code Helper', mode: 'auto', system_prompt: '' });
+  const addRes2 = await handleService(call('POST', `/api/conversations/${conv.id}/agents`, { agentId: 'code-helper' }), { env, fetcher });
+  assert.equal(addRes2.status, 201);
+
+  // 4. Reject nonexistent agent
+  const badAgentRes = await handleService(call('POST', `/api/conversations/${conv.id}/agents`, { agentId: 'nonexistent-agent' }), { env, fetcher });
+  assert.equal(badAgentRes.status, 404);
+
+  // 5. List now has both agents
+  const listRes = await handleService(call('GET', `/api/conversations/${conv.id}/agents`), { env, fetcher });
+  assert.equal(listRes.status, 200);
+  const { agents } = await listRes.json();
+  assert.equal(agents.length, 2);
+  assert.deepEqual(agents.map(a => a.agentId), ['personal-agent', 'code-helper']);
+
+  // 6. Delete agent from conversation
+  const delRes = await handleService(call('DELETE', `/api/conversations/${conv.id}/agents/code-helper`), { env, fetcher });
+  assert.equal(delRes.status, 204);
+
+  // 7. Verify deletion
+  const listResAfter = await handleService(call('GET', `/api/conversations/${conv.id}/agents`), { env, fetcher });
+  assert.equal((await listResAfter.json()).agents.length, 1);
+
+  // 8. Delete nonexistent agent returns 404
+  const delMissingRes = await handleService(call('DELETE', `/api/conversations/${conv.id}/agents/code-helper`), { env, fetcher });
+  assert.equal(delMissingRes.status, 404);
+});
+
+test('Phase 4A: Multi-Agent streaming chat tags events with agentId and saves turns', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C1, agent_id: 'personal-agent' });
+  // Add a second agent to the conversation
+  db.addConversationAgent(conv.id, 'personal-agent');
+  db.addConversationAgent(conv.id, 'dua-agent');
+
+  const geminiRoutes = [
+    [url => url.includes(':streamGenerateContent'), () => sseResponse([
+      sse({ candidates: [{ content: { parts: [{ text: 'Answer chunk' }] } }] }),
+      sse({ usageMetadata: { totalTokenCount: 15 } }),
+    ])],
+  ];
+  const fetcher = router([...db.routes, ...geminiRoutes]);
+
+  // User mentions both agents in the prompt
+  const response = await handleService(call('POST', '/api/chat', {
+    model: 'Dua',
+    messages: [{ role: 'user', text: '@PersonalAgent and @DuaAgent please give your views' }],
+    conversation_id: conv.id,
+    stream: true,
+  }), { env, fetcher });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'text/event-stream; charset=utf-8');
+
+  const events = await readEvents(response);
+  // Verify tagged events
+  const textEvents = events.filter(e => e.type === 'text');
+  assert.ok(textEvents.length >= 2, 'Expected text events from multiple agents');
+  assert.ok(textEvents.some(e => e.agentId === 'personal-agent'));
+  assert.ok(textEvents.some(e => e.agentId === 'dua-agent'));
+
+  const agentDoneEvents = events.filter(e => e.type === 'agent_done');
+  assert.equal(agentDoneEvents.length, 2);
+  assert.ok(agentDoneEvents.some(e => e.agentId === 'personal-agent'));
+  assert.ok(agentDoneEvents.some(e => e.agentId === 'dua-agent'));
+
+  // Final stream done
+  assert.ok(events.some(e => e.type === 'done'));
+
+  // Verify that dua_messages contains 1 user turn + 2 separate assistant turns (one for each agent)
+  assert.equal(db.messages.length, 3);
+  assert.equal(db.messages[0].role, 'user');
+  assert.equal(db.messages[1].role, 'assistant');
+  assert.equal(db.messages[2].role, 'assistant');
+  const agentIds = [db.messages[1].agent_id, db.messages[2].agent_id].sort();
+  assert.deepEqual(agentIds, ['dua-agent', 'personal-agent']);
+});
+
+test('Phase 4A: Multi-Agent non-streaming chat returns replies and saves turns', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C2, title: 'Group Chat', agent_id: 'personal-agent' });
+  db.addConversationAgent(conv.id, 'personal-agent');
+  db.addConversationAgent(conv.id, 'dua-agent');
+
+  let callCount = 0;
+  const geminiRoutes = [
+    [url => url.includes(':generateContent'), () => {
+      callCount++;
+      return Response.json({
+        candidates: [{ content: { parts: [{ text: `Answer from agent ${callCount}` }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 3 }
+      });
+    }],
+  ];
+  const fetcher = router([...db.routes, ...geminiRoutes]);
+
+  const reqBody = {
+    model: 'Dua',
+    messages: [{ role: 'user', text: '@PersonalAgent and @DuaAgent answer together' }],
+    conversation_id: conv.id,
+    stream: false,
+  };
+
+  const response = await handleService(call('POST', '/api/chat', reqBody), { env, fetcher });
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.ok(Array.isArray(data.replies));
+  assert.equal(data.replies.length, 2);
+  assert.equal(data.replies[0].agentId, 'personal-agent');
+  assert.equal(data.replies[1].agentId, 'dua-agent');
+
+  // Verify that dua_messages saved both assistant turns
+  assert.equal(db.messages.length, 3);
+  assert.equal(db.messages[0].role, 'user');
+  assert.equal(db.messages[1].role, 'assistant');
+  assert.equal(db.messages[2].role, 'assistant');
+  assert.deepEqual([db.messages[1].agent_id, db.messages[2].agent_id].sort(), ['dua-agent', 'personal-agent']);
 });
