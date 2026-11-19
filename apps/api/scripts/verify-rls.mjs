@@ -9,6 +9,7 @@ export const DEFAULT_TABLES = Object.freeze([
   'dua_workflow_automation', 'dua_workflow_deliveries', 'dua_orhan_tasks', 'dua_artifacts', 'dua_memories',
   'dua_conversations', 'dua_messages', 'dua_agents', 'dua_agent_skills',
   'dua_conversation_agents', 'dua_artifact_versions', 'dua_agent_instructions', 'dua_agent_triggers',
+  'dua_device_tokens', 'dua_notifications',
 ]);
 const fail = reason => ({ ok: false, reason });
 function configuration(env) {

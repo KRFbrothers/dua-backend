@@ -17,6 +17,7 @@ import { handleBuildPr } from '../core/build-pr.mjs';
 import { handleArtifactsMemories } from '../core/artifacts-memories.mjs';
 import { handleConversations } from '../core/conversations.mjs';
 import { handleAgentsSkills } from '../core/agents-skills.mjs';
+import { handleNotifications } from '../core/notifications.mjs';
 import { withRequestLog } from '../core/request-logging.mjs';
 import { switchResponse, killSwitches, PAUSED } from '../core/kill-switches.mjs';
 import { applyCors, corsPreflight, requestOriginAllowed } from '../core/cors.mjs';
@@ -73,6 +74,8 @@ async function routeService(request,{env=process.env,fetcher=fetch}={}) {
  if(path==='/api/conversations'||path.startsWith('/api/conversations/'))return handleConversations(request,{env,fetcher});
  // Agents and skills: owner-only (Supabase sign-in + DUA_ALLOWED_EMAIL), user token + anon key, checked inside handleAgentsSkills.
  if(path==='/api/agents'||path.startsWith('/api/agents/')||path==='/api/skills'||path.startsWith('/api/skills/'))return handleAgentsSkills(request,{env,fetcher});
+ // Device tokens and notifications: owner-only (Supabase sign-in + DUA_ALLOWED_EMAIL), user token + anon key, checked inside handleNotifications.
+ if(path.startsWith('/api/devices')||path==='/api/notifications'||path.startsWith('/api/notifications/'))return handleNotifications(request,{env,fetcher});
  if(['/api/chat','/api/search','/api/connectors/github'].includes(path)) {
   if(request.method!=='POST')return Response.json({error:'Method not allowed.'},{status:405,headers:{'Cache-Control':'no-store'}});
   const advanced=path==='/api/connectors/github';
