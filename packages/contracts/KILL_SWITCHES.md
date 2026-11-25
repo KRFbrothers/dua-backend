@@ -67,7 +67,7 @@ retain their existing checks and response shapes.
 
 Maintenance takes precedence where the current route guards apply. It pauses
 selected AI work, not every route: account, configuration and stored-data access
-remain available as described in the [operations guide](../../docs/KILL_SWITCHES.md).
+remain available.
 Agent leaves normal chat available; Imagine pauses image work (and API video);
 Voice pauses API AI/live voice while device voice remains available. Route
 coverage and exemptions are implementation-specific and are not expanded by

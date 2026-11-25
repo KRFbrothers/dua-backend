@@ -65,7 +65,7 @@ shipped behaviour; this file describes the target and the order of work.
 
 ### PR A: plan, owner fail-fast, shared engine client (done: PR #18)
 
-- This file, linked from `AGENTS.md`.
+- This file, linked from `AGENTS.md` (Project docs section).
 - `dua-api` refuses to start in production when `DUA_ALLOWED_EMAIL` is missing, empty or invalid
   (clear error, exit code 1). The access policy fails closed in production. Request-time 503
   behaviour is unchanged.
@@ -101,7 +101,7 @@ shipped behaviour; this file describes the target and the order of work.
   `last_message_preview`, literal title search, limit/offset and `before` paging, hard delete with
   cascade, nullable `model`, `token_count` and `usage`. Messages are read-only until PR D.
 
-### PR D: chat persistence via `conversation_id` (this PR)
+### PR D: chat persistence via `conversation_id` (done: PR #21)
 
 - Node `/api/chat` accepts an optional `conversation_id` (or `conversationId`) and optional `agent_id`.
 - It saves the user message to `dua_messages` before the stream or generation starts. When the stream
