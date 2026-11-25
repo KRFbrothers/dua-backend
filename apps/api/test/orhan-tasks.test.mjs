@@ -476,3 +476,85 @@ test('K3: stopping twice returns 200 with the same stopped task', async () => {
   assert.equal(again.updatedAtMs, stopped.updatedAtMs);
 });
 // ---- end PR K3 ----
+
+// ---- PR K4 (test/control-plane-actions): README/AGENTS.md control-plane actions ----
+// create_task = POST /api/orhan/tasks, get_task_status = GET /api/orhan/tasks/:id,
+// stop_task = POST /api/orhan/tasks/:id/cancel (direct_reply is covered in chat.test.mjs).
+const TASK_ROUTES = id => [
+  ['GET', '/api/orhan/tasks'],
+  ['POST', '/api/orhan/tasks', { prompt: 'A saved job' }],
+  ['GET', `/api/orhan/tasks/${id}`],
+  ['POST', `/api/orhan/tasks/${id}/start`],
+  ['POST', `/api/orhan/tasks/${id}/continue`],
+  ['POST', `/api/orhan/tasks/${id}/cancel`],
+  ['POST', `/api/orhan/tasks/${id}/retry`],
+];
+
+test('control plane: create_task, get_task_status and stop_task on a running task', async () => {
+  const engineCalls = [];
+  const { fetcher } = store((url, body) => { engineCalls.push(body.agent || 'plan'); return steps({ research: ok })(url, body); });
+  const created = await send(fetcher, 'POST', '/api/orhan/tasks', { prompt: 'A saved job' });
+  assert.equal(created.status, 200);
+  const task = await taskOf(created);
+  assert.equal((await taskOf(await send(fetcher, 'GET', `/api/orhan/tasks/${task.id}`))).lifecycleStatus, 'queued');
+  await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/start`);
+  await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/continue`);
+  const running = await taskOf(await send(fetcher, 'GET', `/api/orhan/tasks/${task.id}`));
+  assert.equal(running.lifecycleStatus, 'running');
+  assert.equal(running.steps[0].status, 'completed');
+  const stopped = await taskOf(await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/cancel`));
+  assert.equal(stopped.lifecycleStatus, 'stopped');
+  assert.equal(stopped.endReason, 'user_stop');
+  const after = await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/continue`);
+  assert.equal(after.status, 409);
+  assert.equal((await taskOf(await send(fetcher, 'GET', `/api/orhan/tasks/${task.id}`))).lifecycleStatus, 'stopped');
+  assert.deepEqual(engineCalls, ['plan', 'research']);
+});
+
+test('control plane: every task route needs sign-in (401) and the configured owner (403) before storage', async () => {
+  for (const [method, path, body] of TASK_ROUTES(MISSING)) {
+    const signedOut = router([]);
+    const denied = await handleService(call(method, path, body, ''), { env, fetcher: signedOut });
+    assert.equal(denied.status, 401, `${method} ${path}`);
+    assert.equal(signedOut.calls.length, 0, `${method} ${path}`);
+    const stranger = router([], { email: 'someone@example.com' });
+    const refused = await handleService(call(method, path, body), { env, fetcher: stranger });
+    assert.equal(refused.status, 403, `${method} ${path}`);
+    assert.deepEqual(stranger.calls.map(item => item.url), [SUPA + '/auth/v1/user'], `${method} ${path}`);
+  }
+});
+
+test('control plane: another owner\'s task is 404 on continue and retry and is never changed', async () => {
+  const { rows, fetcher } = store(plan);
+  const foreign = { owner_id: OTHER, task_id: crypto.randomUUID(), title: 'Theirs', prompt: 'Their job', status: 'failed', plan: { title: 'Theirs', agents }, steps: [], artifact: null, error: 'x', run_count: 1, started_at_ms: 1, created_at_ms: 1, updated_at_ms: 1 };
+  rows.push(foreign);
+  for (const action of ['continue', 'retry']) {
+    assert.equal((await send(fetcher, 'POST', `/api/orhan/tasks/${foreign.task_id}/${action}`)).status, 404, action);
+  }
+  assert.equal(foreign.status, 'failed');
+  assert.equal(foreign.updated_at_ms, 1);
+});
+
+test('control plane: task errors are JSON { error } with no-store', async () => {
+  const { fetcher } = store(plan);
+  const task = await createTask(fetcher);
+  await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/start`);
+  const cases = [
+    [400, await send(fetcher, 'POST', '/api/orhan/tasks', { prompt: '' })],
+    [400, await send(fetcher, 'POST', '/api/orhan/tasks', { prompt: 'A saved job', requestId: 'nope' })],
+    [401, await handleService(call('GET', '/api/orhan/tasks', null, ''), { env, fetcher: router([]) })],
+    [404, await send(fetcher, 'GET', `/api/orhan/tasks/${MISSING}`)],
+    [404, await send(fetcher, 'GET', '/api/orhan/tasks/not-a-uuid')],
+    [405, await send(fetcher, 'DELETE', `/api/orhan/tasks/${task.id}`)],
+    [409, await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/retry`)],
+  ];
+  for (const [status, response] of cases) {
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get('cache-control'), 'no-store', String(status));
+    assert.match(response.headers.get('content-type'), /application\/json/, String(status));
+    const body = await response.json();
+    assert.deepEqual(Object.keys(body), ['error'], String(status));
+    assert.equal(typeof body.error, 'string');
+  }
+});
+// ---- end PR K4 ----

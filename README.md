@@ -57,6 +57,17 @@ The first stable control-plane actions are:
 
 After these actions are reliable, the project can expand into execution workers, tools, files, browser operations, memory improvements and advanced agent workflows.
 
+In this repository the actions map onto existing `dua-api` routes. Tasks are the existing Orhan tasks (`apps/api/src/core/orhan-tasks.mjs`, table `dua_orhan_tasks`). Request and response details are in [API_CONTRACT.md](API_CONTRACT.md#orhan-tasks).
+
+| Action | Route | Notes |
+|---|---|---|
+| `direct_reply` | `POST /api/chat` | Dua chat reply; no task is created. |
+| `create_task` | `POST /api/orhan/tasks` | Optional `requestId` (UUID) makes a repeated create return the same task. |
+| `get_task_status` | `GET /api/orhan/tasks/:id` | Returns `lifecycleStatus`; the legacy `status` field is unchanged. |
+| `stop_task` | `POST /api/orhan/tasks/:id/cancel` | Stopping an already stopped task returns it unchanged. |
+
+All task routes need the signed-in owner's Bearer token, and a task that belongs to someone else is `404`.
+
 ## Task Lifecycle
 
 A task should move through a predictable lifecycle:
