@@ -67,7 +67,7 @@ while IFS= read -r line; do
     # Do not silently turn them into Secret Manager bindings if an operator happens
     # to create a secret with the same name.
     case "$name" in PORT|DUA_REQUIRE_LOGIN|DUA_CHAT_DEADLINE_SECONDS|DUA_WORKFLOWS_ENABLED|DUA_WORKFLOW_EXTERNAL_TRIGGERS_ENABLED|DUA_WORKFLOW_OWNER_ID) continue ;; esac
-    # Remote kill switches are owned by `gcloud run services update --update-env-vars` (docs/KILL_SWITCHES.md).
+    # Remote kill switches are owned by `gcloud run services update --update-env-vars` (packages/contracts/KILL_SWITCHES.md).
     # The deployer never passes them, so they survive every deploy.
     if is_kill_switch "$name"; then continue; fi
     if [[ -v "secret_names[$name]" ]]; then

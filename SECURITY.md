@@ -24,7 +24,7 @@ We will acknowledge reports within 48 hours and aim to provide an update within 
 - Verify repository/org-level secret scanning and push protection in GitHub settings; this repository does not configure those hosted settings.
 
 ### Dependency Management
-- Keep dependencies up to date; review the Android dependency graph and run dependency checks supported by the configured environment.
+- Keep dependencies up to date; Dependabot (`.github/dependabot.yml`) proposes weekly npm (`apps/api`) and GitHub Actions updates. Python engine requirements live in `apps/ai-engine/requirements*.txt` and are not covered by Dependabot.
 - Verify GitHub dependency graph, Dependabot alerts and update PR settings in repository/org settings; they are not configured by the checked-in CI workflow.
 
 ### Code Review & Branch Protection
@@ -72,7 +72,7 @@ We will acknowledge reports within 48 hours and aim to provide an update within 
 
 ### Testing & CI/CD
 - Backend (`apps/api/`): Node tests cover authentication, owner access, storage, account deletion, providers and sync behavior. Run `cd apps/api && npm test`.
-- Android: Gradle JVM unit tests and source compilation; no APK or instrumented tests in CI.
+- Engine (`apps/ai-engine/`): pytest suite, run in CI twice (Flask-only and with the real ADK SDK plus a disposable Postgres). Run `python -m pytest -q apps/ai-engine/tests` from the repository root.
 - The checked-in workflows do not run dependency or secret scanning. Verify any GitHub-hosted scanning configuration separately.
 
 ## Updates & Notifications

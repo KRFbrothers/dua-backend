@@ -139,3 +139,72 @@ test('the agent switch refuses Orhan before any storage call', async () => {
   assert.equal((await response.json()).paused, 'agent');
   assert.equal(fetcher.calls.length, 0);
 });
+
+test('a job longer than 4000 characters, an empty job or invalid JSON is refused before the engine or storage', async () => {
+  const engineCalls = [];
+  const { rows, fetcher } = store(url => { engineCalls.push(url); return Response.json({ title: 'Notes', agents, steps: planSteps }); });
+  const tooLong = await handleService(call('POST', '/api/orhan/tasks', { prompt: 'x'.repeat(4001) }), { env, fetcher });
+  assert.equal(tooLong.status, 413);
+  assert.equal((await tooLong.json()).error, 'The job is too long.');
+  const empty = await handleService(call('POST', '/api/orhan/tasks', { prompt: '   ' }), { env, fetcher });
+  assert.equal(empty.status, 400);
+  assert.equal((await empty.json()).error, 'Tell Dua Agent what to do.');
+  const broken = await handleService(new Request('https://dua.test/api/orhan/tasks', { method: 'POST', headers: { authorization: 'Bearer user-token', 'content-type': 'application/json' }, body: '{not json' }), { env, fetcher });
+  assert.equal(broken.status, 400);
+  assert.equal(engineCalls.length, 0);
+  assert.equal(rows.length, 0);
+});
+
+test('an unknown or malformed task id is not found', async () => {
+  const { fetcher } = store(() => Response.json({ title: 'Notes', agents, steps: planSteps }));
+  const unknown = '00000000-0000-4000-8000-000000000000';
+  for (const action of ['continue', 'retry']) {
+    const response = await handleService(call('POST', `/api/orhan/tasks/${unknown}/${action}`), { env, fetcher });
+    assert.equal(response.status, 404, action);
+    assert.equal((await response.json()).error, 'That task was not found.');
+  }
+  const malformed = router([]);
+  const response = await handleService(call('POST', '/api/orhan/tasks/not-a-uuid/continue'), { env, fetcher: malformed });
+  assert.equal(response.status, 404);
+  assert.equal(malformed.calls.length, 0);
+});
+
+test('a running task past its 10 minute limit fails without calling the engine', async () => {
+  const engineCalls = [];
+  const { rows, fetcher } = store((url, body) => {
+    engineCalls.push(body.agent || 'plan');
+    if (url.endsWith('/plan')) return Response.json({ title: 'Notes', agents, steps: planSteps });
+    return Response.json({ status: 'completed', output: 'should not run' });
+  });
+  const task = (await (await handleService(call('POST', '/api/orhan/tasks', { prompt: 'A slow job' }), { env, fetcher })).json()).task;
+  assert.equal((await handleService(call('POST', `/api/orhan/tasks/${task.id}/start`), { env, fetcher })).status, 200);
+  rows[0].started_at_ms = Date.now() - (10 * 60 * 1000 + 1000);
+  const response = await handleService(call('POST', `/api/orhan/tasks/${task.id}/continue`), { env, fetcher });
+  assert.equal(response.status, 200);
+  const timedOut = (await response.json()).task;
+  // Current behaviour: the time limit is reported as `failed` (there is no `timed_out` status yet).
+  assert.equal(timedOut.status, 'failed');
+  assert.equal(timedOut.error, 'This task reached its 10 minute limit.');
+  assert.deepEqual(timedOut.limits, { maxSteps: 12, maxMinutes: 10 });
+  assert.deepEqual(engineCalls, ['plan']);
+});
+
+test('a task at its step limit fails on continue and cannot be retried', async () => {
+  const engineCalls = [];
+  const { rows, fetcher } = store((url, body) => {
+    engineCalls.push(body.agent || 'plan');
+    if (url.endsWith('/plan')) return Response.json({ title: 'Notes', agents, steps: planSteps });
+    return Response.json({ status: 'completed', output: 'should not run' });
+  });
+  const task = (await (await handleService(call('POST', '/api/orhan/tasks', { prompt: 'A long job' }), { env, fetcher })).json()).task;
+  assert.equal((await handleService(call('POST', `/api/orhan/tasks/${task.id}/start`), { env, fetcher })).status, 200);
+  rows[0].run_count = 12;
+  const response = await handleService(call('POST', `/api/orhan/tasks/${task.id}/continue`), { env, fetcher });
+  const limited = (await response.json()).task;
+  assert.equal(limited.status, 'failed');
+  assert.equal(limited.error, 'This task reached its step limit.');
+  const retry = await handleService(call('POST', `/api/orhan/tasks/${task.id}/retry`), { env, fetcher });
+  assert.equal(retry.status, 409);
+  assert.equal((await retry.json()).error, 'This task reached its step limit.');
+  assert.deepEqual(engineCalls, ['plan']);
+});

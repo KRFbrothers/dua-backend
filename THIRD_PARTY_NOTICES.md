@@ -190,4 +190,4 @@ The new home uses the system typeface.
 The old Telegram blob drawable, its license file, and the old attachment icons
 (`og_photo_camera.xml`, `og_photo_library.xml`, `og_upload.xml`, `og_graphic_eq.xml`)
 were removed with the previous chat shell. Material Symbols that still ship keep
-[MaterialSymbols-LICENSE.txt](apps/android/app/src/main/assets/licenses/MaterialSymbols-LICENSE.txt).
+`apps/android/app/src/main/assets/licenses/MaterialSymbols-LICENSE.txt` (Android app source, not part of this repository).
