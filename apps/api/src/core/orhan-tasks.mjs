@@ -13,6 +13,7 @@ const COLUMNS = 'task_id,title,prompt,status,plan,steps,artifact,error,run_count
 const LIFECYCLE = { waiting: 'queued', running: 'running', approval_needed: 'running', completed: 'completed', failed: 'failed', cancelled: 'stopped' };
 const noStore = (error, status, extra = {}) => Response.json({ error, ...extra }, { status, headers: { 'Cache-Control': 'no-store' } });
 const inflight = new Set();
+const DUPLICATE = Symbol('duplicate');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const AGENTS = {
   research: ['search'],
@@ -84,6 +85,13 @@ async function createTask(request, db, owner, env, fetcher) {
   if (typeof data?.prompt === 'string' && data.prompt.trim().length > 4000) return noStore('The job is too long.', 413);
   const prompt = clean(data?.prompt, 4000, { keepLines: true });
   if (!prompt) return noStore('Tell Dua Agent what to do.', 400);
+  // Optional client request ID (UUID) becomes the task ID, so a retried create returns the same task.
+  if (data.requestId !== undefined && (typeof data.requestId !== 'string' || !UUID.test(data.requestId))) return noStore('Invalid requestId.', 400);
+  const requestId = data.requestId?.toLowerCase() || null;
+  if (requestId) {
+    const existing = await findTask(db, requestId);
+    if (existing) return replay(existing, prompt);
+  }
   const team = Array.isArray(data?.team) ? data.team : null;
   const target = engineUrl(env, '/api/orhan/plan');
   if (!target) return noStore('Dua Agent\'s AI engine is not configured.', 503);
@@ -105,7 +113,7 @@ async function createTask(request, db, owner, env, fetcher) {
   const now = Date.now();
   const row = {
     owner_id: owner.user.id,
-    task_id: crypto.randomUUID(),
+    task_id: requestId || crypto.randomUUID(),
     title: plan.title,
     prompt,
     status: 'waiting',
@@ -118,9 +126,24 @@ async function createTask(request, db, owner, env, fetcher) {
     created_at_ms: now,
     updated_at_ms: now,
   };
-  const saved = await write(db, '', 'POST', row);
+  const saved = await write(db, '', 'POST', row, { duplicate: Boolean(requestId) });
+  if (saved === DUPLICATE) return replay(await load(db, requestId), prompt);
   if (saved instanceof Response) return saved;
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
+}
+
+// Same requestId and same prompt: return the saved task. A different prompt is a 409.
+function replay(row, prompt) {
+  if (row.prompt !== prompt) return noStore('This requestId was already used for a different job.', 409);
+  return Response.json({ task: present(row) }, { headers: { 'Cache-Control': 'no-store' } });
+}
+
+async function findTask(db, taskId) {
+  try { return await load(db, taskId); }
+  catch (error) {
+    if (error instanceof Response && error.status === 404) return null;
+    throw error;
+  }
 }
 
 async function getTask(db, taskId) {
@@ -220,7 +243,12 @@ async function cancelTask(db, taskId) {
   const now = Date.now();
   const saved = await write(db, `?task_id=eq.${taskId}&status=in.(waiting,running)`, 'PATCH', { status: 'cancelled', end_reason: 'user_stop', stopped_at_ms: now, updated_at_ms: now });
   if (saved instanceof Response) return saved;
-  if (!saved) return await missingOrConflict(db, taskId, 'This task can no longer be cancelled.');
+  if (!saved) {
+    // Stop is idempotent: an already cancelled task is returned as it is.
+    const current = await load(db, taskId);
+    if (current.status === 'cancelled') return Response.json({ task: present(current) }, { headers: { 'Cache-Control': 'no-store' } });
+    return noStore('This task can no longer be cancelled.', 409);
+  }
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -311,12 +339,14 @@ async function missingOrConflict(db, taskId, conflict) {
   return noStore(conflict, 409);
 }
 
-async function write(db, query, method, body) {
+async function write(db, query, method, body, { duplicate = false } = {}) {
   const response = await db(query, {
     method,
     headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
     body: JSON.stringify(body),
   });
+  // PostgREST answers a primary-key conflict (23505) with 409.
+  if (duplicate && response.status === 409) return DUPLICATE;
   if (!response.ok) return upstreamFailure(response.status);
   const rows = await response.json();
   if (!Array.isArray(rows)) return noStore('Dua Agent did not confirm the saved task.', 502);

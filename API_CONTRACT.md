@@ -412,7 +412,7 @@ One running task. Research, then Checker, then Writer. Max 12 steps and 10 minut
 |---|---|---|
 | `GET /api/orhan/tasks` | none | `{ "tasks": [ task ] }` |
 | `GET /api/orhan/tasks/:id` | none | `{ "task": task }` |
-| `POST /api/orhan/tasks` | `{ "prompt": "", "team": null }` prompt max 4000 characters | `{ "task": task }` |
+| `POST /api/orhan/tasks` | `{ "prompt": "", "team": null, "requestId": "uuid" }` prompt max 4000 characters; `requestId` optional | `{ "task": task }` |
 | `POST /api/orhan/tasks/:id/start` | none | `{ "task": task }` |
 | `POST /api/orhan/tasks/:id/continue` | none | `{ "task": task }` |
 | `POST /api/orhan/tasks/:id/cancel` | none | `{ "task": task }` |
@@ -459,7 +459,15 @@ One running task. Research, then Checker, then Writer. Max 12 steps and 10 minut
 
 The 10 minute limit is also applied when tasks are read (`GET` list or one task) and before `start`: a `running` task whose `startedAtMs` is more than 10 minutes old becomes `failed` with `endReason` `timeout` and the error `This task reached its 10 minute limit.`, so an abandoned task no longer blocks a new start. `start` checks that the target task exists (`404`) before the one-running-task rule (`409`).
 
-Errors are `{ "error": "" }`. Missing sign-in is `401`. An `:id` that is not a UUID, or a task the signed-in owner does not have (including another user's task), is `404` on every `:id` route. `start` and `cancel` return `409` when the task exists but is no longer in a state that allows the action.
+Errors are `{ "error": "" }`. Missing sign-in is `401`. An `:id` that is not a UUID, or a task the signed-in owner does not have (including another user's task), is `404` on every `:id` route. `start` returns `409` when the task exists but is no longer `waiting`. `cancel` returns `409` when the task is `completed` or `failed`.
+
+Idempotency:
+
+- `requestId` is an optional UUID chosen by the client (case-insensitive, stored lower-case). It becomes the task `id`. Any other value (not a UUID string) is `400` `{ "error": "Invalid requestId." }`.
+- Repeating `POST /api/orhan/tasks` with the same `requestId` and the same `prompt` returns `200` `{ "task": task }` with the task already saved, in its current state, without a new plan. This also holds when two such requests race: the one that loses the insert returns the saved task.
+- The same `requestId` with a different `prompt` is `409` `{ "error": "This requestId was already used for a different job." }`. `team` is not compared.
+- Without `requestId`, every create makes a new task, as before.
+- `cancel` on a task that is already `cancelled` returns `200` with the task unchanged (same `stoppedAtMs`).
 
 Control-plane actions map onto existing routes:
 
