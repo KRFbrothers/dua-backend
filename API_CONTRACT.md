@@ -411,6 +411,7 @@ One running task. Research, then Checker, then Writer. Max 12 steps and 10 minut
 | Path | Request | Response |
 |---|---|---|
 | `GET /api/orhan/tasks` | none | `{ "tasks": [ task ] }` |
+| `GET /api/orhan/tasks/:id` | none | `{ "task": task }` |
 | `POST /api/orhan/tasks` | `{ "prompt": "", "team": null }` prompt max 4000 characters | `{ "task": task }` |
 | `POST /api/orhan/tasks/:id/start` | none | `{ "task": task }` |
 | `POST /api/orhan/tasks/:id/continue` | none | `{ "task": task }` |
@@ -437,7 +438,18 @@ One running task. Research, then Checker, then Writer. Max 12 steps and 10 minut
 }
 ```
 
-`status` is `waiting`, `running`, `done`, `failed`, or `cancelled`.
+`status` is `waiting`, `running`, `completed`, `failed`, or `cancelled`. The table also allows `approval_needed`, but no current route sets it.
+
+Errors are `{ "error": "" }`. Missing sign-in is `401`. An `:id` that is not a UUID, or a task the signed-in owner does not have (including another user's task), is `404` on every `:id` route. `start` and `cancel` return `409` when the task exists but is no longer in a state that allows the action.
+
+Control-plane actions map onto existing routes:
+
+| Action | Route |
+|---|---|
+| `direct_reply` | `POST /api/chat` |
+| `create_task` | `POST /api/orhan/tasks` |
+| `get_task_status` | `GET /api/orhan/tasks/:id` |
+| `stop_task` | `POST /api/orhan/tasks/:id/cancel` |
 
 ### Workflows
 

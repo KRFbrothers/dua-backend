@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleService } from '../src/server/service-handler.mjs';
-import { filesEnv, router, SUPA, UID } from './files-helpers.mjs';
+import { filesEnv, OTHER, router, SUPA, UID } from './files-helpers.mjs';
 
 const ENGINE = 'https://engine.test';
 const env = { ...filesEnv, DUA_ENGINE_URL: ENGINE };
@@ -139,3 +139,68 @@ test('the agent switch refuses Orhan before any storage call', async () => {
   assert.equal((await response.json()).paused, 'agent');
   assert.equal(fetcher.calls.length, 0);
 });
+
+// ---- PR K1 (fix/orhan-task-status): single-task status and unknown-id 404s ----
+const MISSING = '00000000-0000-4000-8000-000000000000';
+const plan = () => Response.json({ title: 'Notes', agents, steps: planSteps });
+
+test('K1: get_task_status returns one owned task and 404 for an unknown id', async () => {
+  const { fetcher } = store(plan);
+  const task = (await (await handleService(call('POST', '/api/orhan/tasks', { prompt: 'A saved job' }), { env, fetcher })).json()).task;
+  const found = await handleService(call('GET', `/api/orhan/tasks/${task.id}`), { env, fetcher });
+  assert.equal(found.status, 200);
+  assert.equal(found.headers.get('cache-control'), 'no-store');
+  const body = (await found.json()).task;
+  assert.equal(body.id, task.id);
+  assert.equal(body.status, 'waiting');
+  const missing = await handleService(call('GET', `/api/orhan/tasks/${MISSING}`), { env, fetcher });
+  assert.equal(missing.status, 404);
+  assert.equal(typeof (await missing.json()).error, 'string');
+});
+
+test('K1: a malformed task id is 404 before any account or storage call', async () => {
+  for (const [method, path] of [['GET', '/api/orhan/tasks/not-a-uuid'], ['POST', '/api/orhan/tasks/not-a-uuid/start'], ['POST', '/api/orhan/tasks/not-a-uuid/cancel']]) {
+    const fetcher = router([]);
+    const response = await handleService(call(method, path), { env, fetcher });
+    assert.equal(response.status, 404, path);
+    assert.equal(fetcher.calls.length, 0, path);
+  }
+});
+
+test('K1: single-task GET needs sign-in and does not touch storage', async () => {
+  const fetcher = router([]);
+  const response = await handleService(call('GET', `/api/orhan/tasks/${MISSING}`, null, ''), { env, fetcher });
+  assert.equal(response.status, 401);
+  assert.equal(fetcher.calls.length, 0);
+});
+
+test('K1: only GET is allowed on a single task path', async () => {
+  const fetcher = router([]);
+  const response = await handleService(call('POST', `/api/orhan/tasks/${MISSING}`, { prompt: 'x' }), { env, fetcher });
+  assert.equal(response.status, 405);
+  assert.equal(fetcher.calls.length, 0);
+});
+
+test('K1: another owner\'s task is 404 for get, start and cancel and is never changed', async () => {
+  const { rows, fetcher } = store(plan);
+  const foreign = { owner_id: OTHER, task_id: crypto.randomUUID(), title: 'Theirs', prompt: 'Their job', status: 'waiting', plan: { title: 'Theirs', agents }, steps: [], artifact: null, error: null, run_count: 0, started_at_ms: 0, created_at_ms: 1, updated_at_ms: 1 };
+  rows.push(foreign);
+  for (const [method, path] of [['GET', ''], ['POST', '/start'], ['POST', '/cancel']]) {
+    const response = await handleService(call(method, `/api/orhan/tasks/${foreign.task_id}${path}`), { env, fetcher });
+    assert.equal(response.status, 404, method + path);
+  }
+  assert.equal(foreign.status, 'waiting');
+});
+
+test('K1: start and cancel return 404 for an unknown id and keep 409 for a known task in the wrong state', async () => {
+  const { fetcher } = store(plan);
+  assert.equal((await handleService(call('POST', `/api/orhan/tasks/${MISSING}/start`), { env, fetcher })).status, 404);
+  assert.equal((await handleService(call('POST', `/api/orhan/tasks/${MISSING}/cancel`), { env, fetcher })).status, 404);
+  const task = (await (await handleService(call('POST', '/api/orhan/tasks', { prompt: 'A saved job' }), { env, fetcher })).json()).task;
+  assert.equal((await handleService(call('POST', `/api/orhan/tasks/${task.id}/cancel`), { env, fetcher })).status, 200);
+  const again = await handleService(call('POST', `/api/orhan/tasks/${task.id}/cancel`), { env, fetcher });
+  assert.equal(again.status, 409);
+  const restart = await handleService(call('POST', `/api/orhan/tasks/${task.id}/start`), { env, fetcher });
+  assert.equal(restart.status, 409);
+});
+// ---- end PR K1 ----
