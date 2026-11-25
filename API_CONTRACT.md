@@ -426,6 +426,7 @@ One running task. Research, then Checker, then Writer. Max 12 steps and 10 minut
   "title": "",
   "prompt": "",
   "status": "waiting",
+  "lifecycleStatus": "queued",
   "plan": { "title": "", "agents": [], "steps": [] },
   "steps": [],
   "artifact": null,
@@ -434,11 +435,29 @@ One running task. Research, then Checker, then Writer. Max 12 steps and 10 minut
   "startedAtMs": 0,
   "createdAtMs": 0,
   "updatedAtMs": 0,
+  "finishedAtMs": null,
+  "stoppedAtMs": null,
+  "endReason": null,
   "limits": { "maxSteps": 12, "maxMinutes": 10 }
 }
 ```
 
-`status` is `waiting`, `running`, `completed`, `failed`, or `cancelled`. The table also allows `approval_needed`, but no current route sets it.
+`status` is `waiting`, `running`, `completed`, `failed`, or `cancelled`. The table also allows `approval_needed`, but no current route sets it. `status` keeps these legacy values for existing clients.
+
+`lifecycleStatus` is the task lifecycle: `queued`, `running`, `completed`, `failed`, `stopped`, or `timed_out`.
+
+| `status` | `endReason` | `lifecycleStatus` |
+|---|---|---|
+| `waiting` | `null` | `queued` |
+| `running` (or `approval_needed`) | `null` | `running` |
+| `completed` | `null` | `completed` |
+| `failed` | `timeout` | `timed_out` |
+| `failed` | `step_limit`, `error` or `null` | `failed` |
+| `cancelled` | `user_stop` (or `null` on older rows) | `stopped` |
+
+`finishedAtMs` is set when a task ends as `completed` or `failed` (including `timed_out`). `stoppedAtMs` is set by `cancel`. `retry` clears `endReason`, `finishedAtMs` and `stoppedAtMs`. Rows saved before migration `202611250001` have `null` in all three fields, so an older time-limit failure still shows `lifecycleStatus` `failed`.
+
+The 10 minute limit is also applied when tasks are read (`GET` list or one task) and before `start`: a `running` task whose `startedAtMs` is more than 10 minutes old becomes `failed` with `endReason` `timeout` and the error `This task reached its 10 minute limit.`, so an abandoned task no longer blocks a new start. `start` checks that the target task exists (`404`) before the one-running-task rule (`409`).
 
 Errors are `{ "error": "" }`. Missing sign-in is `401`. An `:id` that is not a UUID, or a task the signed-in owner does not have (including another user's task), is `404` on every `:id` route. `start` and `cancel` return `409` when the task exists but is no longer in a state that allows the action.
 

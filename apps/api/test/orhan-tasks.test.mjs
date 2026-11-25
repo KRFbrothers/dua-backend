@@ -39,18 +39,17 @@ function store(stepHandler) {
       const id = url.includes('task_id=eq.') ? decodeURIComponent(url.split('task_id=eq.')[1].split('&')[0]) : '';
       if (id) list = list.filter(row => row.task_id === id);
       if (url.includes('status=eq.running')) list = list.filter(row => row.status === 'running');
+      const before = /started_at_ms=lt\.(\d+)/.exec(url);
+      if (before) list = list.filter(row => Number(row.started_at_ms) < Number(before[1]));
       if (method === 'GET') {
         if (url.includes('select=task_id&')) return Response.json(list.map(row => ({ task_id: row.task_id })));
         return Response.json(list);
       }
-      const row = list[0];
-      if (!row) return Response.json([]);
-      if (url.includes('status=eq.waiting') && row.status !== 'waiting') return Response.json([]);
-      if (url.includes('status=eq.running') && row.status !== 'running') return Response.json([]);
-      if (url.includes('status=eq.failed') && row.status !== 'failed') return Response.json([]);
-      if (url.includes('status=in.(waiting,running)') && !['waiting', 'running'].includes(row.status)) return Response.json([]);
-      Object.assign(row, body);
-      return Response.json([row]);
+      if (url.includes('status=eq.waiting')) list = list.filter(row => row.status === 'waiting');
+      if (url.includes('status=eq.failed')) list = list.filter(row => row.status === 'failed');
+      if (url.includes('status=in.(waiting,running)')) list = list.filter(row => ['waiting', 'running'].includes(row.status));
+      for (const row of list) Object.assign(row, body);
+      return Response.json(list);
     }],
   ]);
   return { rows, fetcher };
@@ -273,3 +272,122 @@ test('K1: start and cancel return 404 for an unknown id and keep 409 for a known
   assert.equal(restart.status, 409);
 });
 // ---- end PR K1 ----
+
+// ---- PR K2 (feat/task-lifecycle): lifecycleStatus, end reasons and lazy time limit ----
+const TEN_MINUTES = 10 * 60 * 1000;
+const steps = outputs => (url, body) => {
+  if (url.endsWith('/plan')) return Response.json({ title: 'Notes', agents, steps: planSteps });
+  return Response.json(outputs[body.agent]);
+};
+const ok = { status: 'completed', output: 'Done.' };
+const send = (fetcher, method, path, body) => handleService(call(method, path, body), { env, fetcher });
+const taskOf = async response => (await response.json()).task;
+const createTask = async fetcher => taskOf(await send(fetcher, 'POST', '/api/orhan/tasks', { prompt: 'A saved job' }));
+
+test('K2: legacy status is unchanged and lifecycleStatus maps waiting->queued, running, completed', async () => {
+  const { fetcher } = store(steps({ research: ok, checker: ok, writer: { status: 'completed', output: '# Report' } }));
+  const task = await createTask(fetcher);
+  assert.equal(task.status, 'waiting');
+  assert.equal(task.lifecycleStatus, 'queued');
+  assert.equal(task.endReason, null);
+  assert.equal(task.finishedAtMs, null);
+  assert.equal(task.stoppedAtMs, null);
+  const started = await taskOf(await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/start`));
+  assert.equal(started.status, 'running');
+  assert.equal(started.lifecycleStatus, 'running');
+  let current = started;
+  for (let index = 0; index < 3; index += 1) current = await taskOf(await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/continue`));
+  assert.equal(current.status, 'completed');
+  assert.equal(current.lifecycleStatus, 'completed');
+  assert.equal(current.endReason, null);
+  assert.ok(current.finishedAtMs > 0);
+  assert.equal(current.artifact.text, '# Report');
+});
+
+test('K2: a failed step is failed with end reason error and a finish time', async () => {
+  const { fetcher } = store(steps({ research: { status: 'failed', error: 'No sources.' } }));
+  const task = await createTask(fetcher);
+  await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/start`);
+  const failed = await taskOf(await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/continue`));
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.lifecycleStatus, 'failed');
+  assert.equal(failed.endReason, 'error');
+  assert.equal(failed.error, 'No sources.');
+  assert.ok(failed.finishedAtMs > 0);
+  const retried = await taskOf(await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/retry`));
+  assert.equal(retried.lifecycleStatus, 'queued');
+  assert.equal(retried.endReason, null);
+  assert.equal(retried.finishedAtMs, null);
+});
+
+test('K2: the step limit is failed with end reason step_limit', async () => {
+  const { rows, fetcher } = store(steps({}));
+  const task = await createTask(fetcher);
+  await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/start`);
+  rows[0].run_count = 12;
+  const limited = await taskOf(await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/continue`));
+  assert.equal(limited.status, 'failed');
+  assert.equal(limited.lifecycleStatus, 'failed');
+  assert.equal(limited.endReason, 'step_limit');
+});
+
+test('K2: cancel is stopped with end reason user_stop and a stop time', async () => {
+  const { fetcher } = store(steps({}));
+  const task = await createTask(fetcher);
+  const stopped = await taskOf(await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/cancel`));
+  assert.equal(stopped.status, 'cancelled');
+  assert.equal(stopped.lifecycleStatus, 'stopped');
+  assert.equal(stopped.endReason, 'user_stop');
+  assert.ok(stopped.stoppedAtMs > 0);
+});
+
+test('K2: continue past 10 minutes is timed_out while legacy status stays failed', async () => {
+  const { rows, fetcher } = store(steps({}));
+  const task = await createTask(fetcher);
+  await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/start`);
+  rows[0].started_at_ms = Date.now() - TEN_MINUTES - 1000;
+  const timedOut = await taskOf(await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/continue`));
+  assert.equal(timedOut.status, 'failed');
+  assert.equal(timedOut.lifecycleStatus, 'timed_out');
+  assert.equal(timedOut.endReason, 'timeout');
+});
+
+test('K2: with a fake clock an abandoned running task expires on read and no longer blocks a new start', async t => {
+  const start = Date.UTC(2026, 10, 25, 12, 0, 0);
+  t.mock.timers.enable({ apis: ['Date'], now: start });
+  const engineCalls = [];
+  const { fetcher } = store((url, body) => { engineCalls.push(body.agent || 'plan'); return steps({})(url, body); });
+  const first = await createTask(fetcher);
+  const second = await createTask(fetcher);
+  assert.equal((await send(fetcher, 'POST', `/api/orhan/tasks/${first.id}/start`)).status, 200);
+  assert.equal((await send(fetcher, 'POST', `/api/orhan/tasks/${second.id}/start`)).status, 409);
+  t.mock.timers.tick(TEN_MINUTES - 1000);
+  assert.equal((await taskOf(await send(fetcher, 'GET', `/api/orhan/tasks/${first.id}`))).lifecycleStatus, 'running');
+  t.mock.timers.tick(2000);
+  const expired = await taskOf(await send(fetcher, 'GET', `/api/orhan/tasks/${first.id}`));
+  assert.equal(expired.status, 'failed');
+  assert.equal(expired.lifecycleStatus, 'timed_out');
+  assert.equal(expired.endReason, 'timeout');
+  assert.equal(expired.error, 'This task reached its 10 minute limit.');
+  assert.equal(expired.finishedAtMs, start + TEN_MINUTES + 1000);
+  const listed = (await (await send(fetcher, 'GET', '/api/orhan/tasks')).json()).tasks;
+  assert.equal(listed.find(item => item.id === first.id).lifecycleStatus, 'timed_out');
+  const next = await send(fetcher, 'POST', `/api/orhan/tasks/${second.id}/start`);
+  assert.equal(next.status, 200);
+  assert.equal((await taskOf(next)).lifecycleStatus, 'running');
+  assert.deepEqual(engineCalls, ['plan', 'plan']);
+});
+
+test('K2: list expiry also frees start, and an unknown id is 404 even while another task runs', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 10, 25, 12, 0, 0) });
+  const { fetcher } = store(steps({}));
+  const first = await createTask(fetcher);
+  const second = await createTask(fetcher);
+  await send(fetcher, 'POST', `/api/orhan/tasks/${first.id}/start`);
+  assert.equal((await send(fetcher, 'POST', `/api/orhan/tasks/${MISSING}/start`)).status, 404);
+  t.mock.timers.tick(TEN_MINUTES + 1);
+  const listed = (await (await send(fetcher, 'GET', '/api/orhan/tasks')).json()).tasks;
+  assert.equal(listed.find(item => item.id === first.id).lifecycleStatus, 'timed_out');
+  assert.equal((await send(fetcher, 'POST', `/api/orhan/tasks/${second.id}/start`)).status, 200);
+});
+// ---- end PR K2 ----
