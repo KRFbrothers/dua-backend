@@ -32,6 +32,7 @@ function store(stepHandler) {
       const method = init.method || 'GET';
       const body = init.body ? JSON.parse(init.body) : null;
       if (method === 'POST') {
+        if (rows.some(row => row.owner_id === body.owner_id && row.task_id === body.task_id)) return Response.json({ code: '23505', message: 'duplicate key value violates unique constraint' }, { status: 409 });
         rows.push(body);
         return Response.json([body], { status: 201 });
       }
@@ -261,13 +262,17 @@ test('K1: another owner\'s task is 404 for get, start and cancel and is never ch
 });
 
 test('K1: start and cancel return 404 for an unknown id and keep 409 for a known task in the wrong state', async () => {
-  const { fetcher } = store(plan);
+  const { rows, fetcher } = store(plan);
   assert.equal((await handleService(call('POST', `/api/orhan/tasks/${MISSING}/start`), { env, fetcher })).status, 404);
   assert.equal((await handleService(call('POST', `/api/orhan/tasks/${MISSING}/cancel`), { env, fetcher })).status, 404);
   const task = (await (await handleService(call('POST', '/api/orhan/tasks', { prompt: 'A saved job' }), { env, fetcher })).json()).task;
   assert.equal((await handleService(call('POST', `/api/orhan/tasks/${task.id}/cancel`), { env, fetcher })).status, 200);
+  // PR K3: a second stop of a cancelled task is idempotent (200); a finished task still cannot be cancelled.
   const again = await handleService(call('POST', `/api/orhan/tasks/${task.id}/cancel`), { env, fetcher });
-  assert.equal(again.status, 409);
+  assert.equal(again.status, 200);
+  const done = (await (await handleService(call('POST', '/api/orhan/tasks', { prompt: 'Another job' }), { env, fetcher })).json()).task;
+  rows.find(row => row.task_id === done.id).status = 'completed';
+  assert.equal((await handleService(call('POST', `/api/orhan/tasks/${done.id}/cancel`), { env, fetcher })).status, 409);
   const restart = await handleService(call('POST', `/api/orhan/tasks/${task.id}/start`), { env, fetcher });
   assert.equal(restart.status, 409);
 });
@@ -391,3 +396,83 @@ test('K2: list expiry also frees start, and an unknown id is 404 even while anot
   assert.equal((await send(fetcher, 'POST', `/api/orhan/tasks/${second.id}/start`)).status, 200);
 });
 // ---- end PR K2 ----
+
+// ---- PR K3 (feat/task-idempotency): requestId replay and idempotent stop ----
+const REQUEST_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+
+test('K3: the same requestId twice makes one engine call and returns the same task', async () => {
+  const engineCalls = [];
+  const { rows, fetcher } = store((url, body) => { engineCalls.push(body.agent || 'plan'); return Response.json({ title: 'Notes', agents, steps: planSteps }); });
+  const first = await send(fetcher, 'POST', '/api/orhan/tasks', { prompt: 'A saved job', requestId: REQUEST_ID });
+  assert.equal(first.status, 200);
+  const created = await taskOf(first);
+  assert.equal(created.id, REQUEST_ID);
+  const second = await send(fetcher, 'POST', '/api/orhan/tasks', { prompt: 'A saved job', requestId: REQUEST_ID.toUpperCase() });
+  assert.equal(second.status, 200);
+  const replayed = await taskOf(second);
+  assert.equal(replayed.id, created.id);
+  assert.equal(replayed.createdAtMs, created.createdAtMs);
+  assert.deepEqual(engineCalls, ['plan']);
+  assert.equal(rows.length, 1);
+});
+
+test('K3: a requestId reused for a different job is 409 and nothing is saved', async () => {
+  const engineCalls = [];
+  const { rows, fetcher } = store((url, body) => { engineCalls.push('plan'); return Response.json({ title: 'Notes', agents, steps: planSteps }); });
+  await send(fetcher, 'POST', '/api/orhan/tasks', { prompt: 'A saved job', requestId: REQUEST_ID });
+  const reused = await send(fetcher, 'POST', '/api/orhan/tasks', { prompt: 'Something else', requestId: REQUEST_ID });
+  assert.equal(reused.status, 409);
+  assert.match((await reused.json()).error, /requestId/);
+  assert.equal(engineCalls.length, 1);
+  assert.equal(rows.length, 1);
+});
+
+test('K3: a concurrent create that loses the insert race returns the saved task', async () => {
+  const { rows, fetcher } = store((url, body) => {
+    // Another request with the same requestId saves first while this one is planning.
+    rows.push({ owner_id: UID, task_id: REQUEST_ID, title: 'Notes', prompt: 'A saved job', status: 'waiting', plan: { title: 'Notes', agents }, steps: [], artifact: null, error: null, run_count: 0, started_at_ms: 0, created_at_ms: 1, updated_at_ms: 1 });
+    return Response.json({ title: 'Notes', agents, steps: planSteps });
+  });
+  const response = await send(fetcher, 'POST', '/api/orhan/tasks', { prompt: 'A saved job', requestId: REQUEST_ID });
+  assert.equal(response.status, 200);
+  const task = await taskOf(response);
+  assert.equal(task.id, REQUEST_ID);
+  assert.equal(task.createdAtMs, 1);
+  assert.equal(rows.length, 1);
+});
+
+test('K3: an invalid requestId is 400 before the engine or storage', async () => {
+  for (const requestId of ['not-a-uuid', 123, '', null]) {
+    const engineCalls = [];
+    const { rows, fetcher } = store(() => { engineCalls.push('plan'); return Response.json({ title: 'Notes', agents, steps: planSteps }); });
+    const response = await send(fetcher, 'POST', '/api/orhan/tasks', { prompt: 'A saved job', requestId });
+    assert.equal(response.status, 400, String(requestId));
+    assert.equal((await response.json()).error, 'Invalid requestId.');
+    assert.equal(engineCalls.length, 0);
+    assert.equal(rows.length, 0);
+    assert.equal(fetcher.calls.filter(item => item.url.includes('/rest/v1/')).length, 0);
+  }
+});
+
+test('K3: without requestId every create is a new task (unchanged)', async () => {
+  const { rows, fetcher } = store(() => Response.json({ title: 'Notes', agents, steps: planSteps }));
+  const first = await createTask(fetcher);
+  const second = await createTask(fetcher);
+  assert.notEqual(first.id, second.id);
+  assert.equal(rows.length, 2);
+});
+
+test('K3: stopping twice returns 200 with the same stopped task', async () => {
+  const { fetcher } = store(steps({}));
+  const task = await createTask(fetcher);
+  const first = await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/cancel`);
+  assert.equal(first.status, 200);
+  const stopped = await taskOf(first);
+  const second = await send(fetcher, 'POST', `/api/orhan/tasks/${task.id}/cancel`);
+  assert.equal(second.status, 200);
+  const again = await taskOf(second);
+  assert.equal(again.lifecycleStatus, 'stopped');
+  assert.equal(again.stoppedAtMs, stopped.stoppedAtMs);
+  assert.equal(again.updatedAtMs, stopped.updatedAtMs);
+});
+// ---- end PR K3 ----
