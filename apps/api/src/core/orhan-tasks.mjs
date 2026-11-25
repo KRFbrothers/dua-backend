@@ -7,6 +7,10 @@ import { engineEndpoint, engineHeaders } from './engine-client.mjs';
 const MAX_STEPS = 12;
 const MAX_MINUTES = 10;
 const MAX_OUTPUT = 12000;
+const TIME_LIMIT_ERROR = 'This task reached its 10 minute limit.';
+const COLUMNS = 'task_id,title,prompt,status,plan,steps,artifact,error,run_count,started_at_ms,created_at_ms,updated_at_ms,end_reason,finished_at_ms,stopped_at_ms';
+// README task lifecycle. The stored `status` stays the legacy value for existing clients.
+const LIFECYCLE = { waiting: 'queued', running: 'running', approval_needed: 'running', completed: 'completed', failed: 'failed', cancelled: 'stopped' };
 const noStore = (error, status, extra = {}) => Response.json({ error, ...extra }, { status, headers: { 'Cache-Control': 'no-store' } });
 const inflight = new Set();
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -48,8 +52,8 @@ export async function handleOrhanTasks(request, { env = process.env, fetcher = f
     inflight.add(lockKey);
   }
   try {
-    if (request.method === 'GET' && taskId) return await loadResponse(db, taskId);
-    if (request.method === 'GET') return await listTasks(db);
+    if (request.method === 'GET' && taskId) return await getTask(db, taskId);
+    if (request.method === 'GET') return await listTasks(db, owner.user.id);
     if (parts.length === 3) return await createTask(request, db, owner, env, fetcher);
     if (action === 'start') return await startTask(db, owner.user.id, taskId);
     if (action === 'continue') return await continueTask(db, taskId, env, fetcher, owner.token);
@@ -63,8 +67,10 @@ export async function handleOrhanTasks(request, { env = process.env, fetcher = f
   }
 }
 
-async function listTasks(db) {
-  const response = await db('?select=task_id,title,prompt,status,plan,steps,artifact,error,run_count,started_at_ms,created_at_ms,updated_at_ms&order=updated_at_ms.desc&limit=30', { method: 'GET' });
+async function listTasks(db, ownerId) {
+  const expired = await expireOverdue(db, `&owner_id=eq.${ownerId}`);
+  if (expired instanceof Response) return expired;
+  const response = await db(`?select=${COLUMNS}&order=updated_at_ms.desc&limit=30`, { method: 'GET' });
   if (!response.ok) return upstreamFailure(response.status);
   const rows = await response.json();
   if (!Array.isArray(rows)) return noStore('Dua Agent returned an invalid task list.', 502);
@@ -117,7 +123,27 @@ async function createTask(request, db, owner, env, fetcher) {
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
+async function getTask(db, taskId) {
+  const expired = await expireOverdue(db, `&task_id=eq.${taskId}`);
+  if (expired instanceof Response) return expired;
+  return loadResponse(db, taskId);
+}
+
+// Lazy time limit: a running task past MAX_MINUTES becomes failed + end_reason timeout
+// when it is read or before a new start, so an abandoned task cannot block new work.
+async function expireOverdue(db, filter) {
+  const now = Date.now();
+  const cutoff = now - MAX_MINUTES * 60 * 1000;
+  const saved = await write(db, `?status=eq.running&started_at_ms=lt.${cutoff}${filter}`, 'PATCH', {
+    status: 'failed', end_reason: 'timeout', error: TIME_LIMIT_ERROR, finished_at_ms: now, updated_at_ms: now,
+  });
+  return saved instanceof Response ? saved : null;
+}
+
 async function startTask(db, ownerId, taskId) {
+  await load(db, taskId);
+  const expired = await expireOverdue(db, `&owner_id=eq.${ownerId}`);
+  if (expired instanceof Response) return expired;
   const running = await db(`?select=task_id&owner_id=eq.${ownerId}&status=eq.running&limit=1`, { method: 'GET' });
   if (!running.ok) return upstreamFailure(running.status);
   const active = await running.json();
@@ -135,10 +161,10 @@ async function continueTask(db, taskId, env, fetcher, token) {
   if (current instanceof Response) return current;
   if (current.status !== 'running') return noStore('Start the task first.', 409);
   if (Date.now() - Number(current.started_at_ms) > MAX_MINUTES * 60 * 1000) {
-    return await finish(db, taskId, current, 'failed', 'This task reached its 10 minute limit.');
+    return await finish(db, taskId, current, 'failed', TIME_LIMIT_ERROR, 'timeout');
   }
   if (Number(current.run_count) >= MAX_STEPS) {
-    return await finish(db, taskId, current, 'failed', 'This task reached its step limit.');
+    return await finish(db, taskId, current, 'failed', 'This task reached its step limit.', 'step_limit');
   }
   const steps = current.steps.map(step => ({ ...step }));
   const step = nextStep(steps);
@@ -175,13 +201,15 @@ async function continueTask(db, taskId, env, fetcher, token) {
   nextStep(updated);
   const status = outcome(updated);
   const artifact = status === 'completed' ? { title: fresh.title, text: updated.find(item => item.id === 'document').output, mime: 'text/markdown' } : fresh.artifact;
+  const now = Date.now();
   const saved = await write(db, `?task_id=eq.${taskId}&status=eq.running`, 'PATCH', {
     steps: updated,
     status,
     artifact: artifact || null,
     error: currentStep.status === 'failed' ? currentStep.error : null,
     run_count: Number(fresh.run_count) + 1,
-    updated_at_ms: Date.now(),
+    updated_at_ms: now,
+    ...ending(status, now),
   });
   if (saved instanceof Response) return saved;
   if (!saved) return loadResponse(db, taskId);
@@ -189,7 +217,8 @@ async function continueTask(db, taskId, env, fetcher, token) {
 }
 
 async function cancelTask(db, taskId) {
-  const saved = await write(db, `?task_id=eq.${taskId}&status=in.(waiting,running)`, 'PATCH', { status: 'cancelled', updated_at_ms: Date.now() });
+  const now = Date.now();
+  const saved = await write(db, `?task_id=eq.${taskId}&status=in.(waiting,running)`, 'PATCH', { status: 'cancelled', end_reason: 'user_stop', stopped_at_ms: now, updated_at_ms: now });
   if (saved instanceof Response) return saved;
   if (!saved) return await missingOrConflict(db, taskId, 'This task can no longer be cancelled.');
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
@@ -206,7 +235,7 @@ async function retryTask(db, taskId) {
     if (step.status === 'failed' || (reset && step.status === 'skipped')) return { ...step, status: 'pending', output: '', error: null };
     return step;
   });
-  const saved = await write(db, `?task_id=eq.${taskId}&status=eq.failed`, 'PATCH', { status: 'waiting', steps, error: null, artifact: null, updated_at_ms: Date.now() });
+  const saved = await write(db, `?task_id=eq.${taskId}&status=eq.failed`, 'PATCH', { status: 'waiting', steps, error: null, artifact: null, end_reason: null, finished_at_ms: null, stopped_at_ms: null, updated_at_ms: Date.now() });
   if (saved instanceof Response) return saved;
   if (!saved) return noStore('This task is no longer failed.', 409);
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
@@ -240,9 +269,17 @@ function outcome(steps) {
   return 'failed';
 }
 
-async function finish(db, taskId, current, status, error) {
+// Terminal fields: finished_at_ms on completed/failed; end_reason on failure (default error).
+function ending(status, now, reason = 'error') {
+  if (status === 'completed') return { finished_at_ms: now, end_reason: null };
+  if (status === 'failed') return { finished_at_ms: now, end_reason: reason };
+  return {};
+}
+
+async function finish(db, taskId, current, status, error, reason = 'error') {
+  const now = Date.now();
   const saved = await write(db, `?task_id=eq.${taskId}&status=eq.running`, 'PATCH', {
-    status, error, steps: current.steps, updated_at_ms: Date.now(),
+    status, error, steps: current.steps, updated_at_ms: now, ...ending(status, now, reason),
   });
   if (saved instanceof Response) return saved;
   if (!saved) return loadResponse(db, taskId);
@@ -250,7 +287,7 @@ async function finish(db, taskId, current, status, error) {
 }
 
 async function load(db, taskId) {
-  const response = await db(`?select=task_id,title,prompt,status,plan,steps,artifact,error,run_count,started_at_ms,created_at_ms,updated_at_ms&task_id=eq.${taskId}&limit=1`, { method: 'GET' });
+  const response = await db(`?select=${COLUMNS}&task_id=eq.${taskId}&limit=1`, { method: 'GET' });
   if (!response.ok) throw upstreamFailure(response.status);
   const rows = await response.json();
   if (!Array.isArray(rows)) throw noStore('Dua Agent returned an invalid task.', 502);
@@ -319,6 +356,7 @@ function present(row) {
     title: row.title,
     prompt: row.prompt,
     status: row.status,
+    lifecycleStatus: lifecycle(row),
     plan: row.plan,
     steps: row.steps,
     artifact: row.artifact || null,
@@ -327,8 +365,16 @@ function present(row) {
     startedAtMs: Number(row.started_at_ms) || 0,
     createdAtMs: Number(row.created_at_ms),
     updatedAtMs: Number(row.updated_at_ms),
+    finishedAtMs: Number(row.finished_at_ms) || null,
+    stoppedAtMs: Number(row.stopped_at_ms) || null,
+    endReason: row.end_reason || null,
     limits: { maxSteps: MAX_STEPS, maxMinutes: MAX_MINUTES },
   };
+}
+
+function lifecycle(row) {
+  if (row.status === 'failed' && row.end_reason === 'timeout') return 'timed_out';
+  return LIFECYCLE[row.status] || 'failed';
 }
 
 function clean(value, max, { clip = false, keepLines = false } = {}) {

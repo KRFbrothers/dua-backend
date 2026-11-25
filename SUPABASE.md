@@ -132,6 +132,17 @@ Apply `supabase/migrations/202611190001_dua_conversations_messages.sql` once, us
 
 `dua-api` reads and writes these tables only with the signed-in owner's token and the anon key (`/api/conversations`, see [API_CONTRACT.md](API_CONTRACT.md)). The `service_role` table grant exists only for the scheduled backup job; the API never uses it here. Nothing is copied from `dua_cloud_snapshots`, and `/api/cloud` is unchanged.
 
+## 1f. Orhan task lifecycle
+
+Apply `supabase/migrations/202611250001_dua_orhan_tasks_lifecycle.sql` after `202611090001_dua_orhan_tasks.sql`, using the [CLI workspace](#repository-paths-and-cli-workspace) workflow (`db push` only after explicit owner approval). It is safe to run again. It:
+
+- adds three nullable columns to `public.dua_orhan_tasks`: `end_reason` (`timeout`, `step_limit`, `user_stop` or `error`), `finished_at_ms` and `stopped_at_ms` (positive epoch milliseconds);
+- does not rewrite existing rows and does not change the `status` check, RLS policies, grants or the prune trigger. It adds no table, so the `verify:rls` table list is unchanged.
+
+`dua-api` reads and writes these columns with the signed-in owner's token and the anon key, and maps `status` + `end_reason` to `lifecycleStatus` (see [API_CONTRACT.md](API_CONTRACT.md)).
+
+**Deploy order:** apply this migration before deploying a `dua-api` that includes PR K2. That API selects the new columns, so without them every `/api/orhan/tasks` call fails with the "migration" setup error.
+
 ## 2. Configure the shared backend
 
 Add these as Secret Manager secrets (same names) and re-run `apps/api/deploy-cloudrun.sh`:
