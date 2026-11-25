@@ -1,36 +1,141 @@
-android/AGENTS.md
-Scope: Android app only (Kotlin, Jetpack Compose, Material 3, Room, Navigation Compose). Read root AGENTS.md first for repo-wide guardrails.
-1. Tech Stack & Core Architecture
-UI Toolkit: 100% Jetpack Compose + Material 3 (androidx.compose.material3, Compose-first). Do NOT create XML UI layouts (themes.xml is only for the Android launch window theme).
-State & Data Flow: Unidirectional flow only: UI Screen → ViewModel → Repository → Room DAO / HTTP API.
-Strict Separation: Never place business logic, networking, database queries, or API keys inside Composable screens.
-No Figma Dependency: Iterate UI directly in Jetpack Compose using @Preview (Light + Dark) and physical device verification.
-2. Exact Commands (Run from android/ root)
-Build Debug APK: ./gradlew assembleDebug
-JVM Unit Tests: ./gradlew testDebugUnitTest
-Android Lint: ./gradlew lintDebug
-Instrumented / Compose UI Tests (device/emulator): ./gradlew connectedDebugAndroidTest
-3. Material 3 & Jetpack Compose UI Rules (Mandatory)
-Zero Hardcoded Colors in Screens: Never write Color(0xFF...), Color.White, Color.Black, or Color.Gray in screen composables. Always use MaterialTheme.colorScheme.* or semantic theme tokens (ui/theme/Color.kt, Theme.kt, Shape.kt, Type.kt).
-Strict 4.dp Grid: All spacing, padding, sizes, and corner radii must be multiples of 4.dp (only 0.5.dp, 1.dp, 2.dp allowed for hairlines/borders/dividers).
-48dp Minimum Touch Targets: Every interactive IconButton, icon action, and clickable row must keep at least 48.dp × 48.dp hit area. Never shrink an IconButton with Modifier.size(20.dp) or similar.
-Accessibility & Semantics:
-Group radio rows with Modifier.selectableGroup(), use Modifier.selectable(selected, role = Role.RadioButton, onClick = ...) on the row, and set RadioButton(onClick = null) to avoid duplicate TalkBack focus.
-Set meaningful stringResource(...) contentDescription on every interactive icon (null only on decorative icons paired with visible text).
-M3 1.5+ Expressive API Parity:
-Use the modern ListItem(content = ..., supportingContent = ...) overload and ListItemDefaults.colors(contentColor = ..., supportingContentColor = ...) — never deprecated headlineContent / headlineColor.
-Anchor DropdownMenu inside a Box wrapping its trigger IconButton (never at screen root).
-Wire TopAppBarDefaults.pinnedScrollBehavior() + Modifier.nestedScroll(scrollBehavior.nestedScrollConnection) on scrollable screens.
-Typography & Bundled Fonts: Use MaterialTheme.typography.* (including *Emphasized styles) backed by bundled Lato TTF weights (400, 500, 700, 900). Do NOT use FontWeight.SemiBold (600) unless a matching TTF is bundled.
-Strings & Localization: Put all user-facing UI text in app/src/main/res/values/strings.xml — zero hardcoded UI copy in composables.
-Edge-to-Edge & Safe Activity Lookup: Consume Scaffold innerPadding and apply navigationBarsPadding() + imePadding() on bottom composers/sheets. Safely unwrap Activity via ContextWrapper (never raw view.context as Activity).
-UI Design Freeze: When working on ViewModel, Repository, Room, or API tasks, do NOT modify UI colors, typography, spacing, shapes, or navigation unless explicitly requested.
-4. Zero-Duplication & Database Guardrails
-In-Place Edits Only: Search existing files first and update canonical files in-place. Never create duplicate files (*V2.kt, *New.kt, *Copy.kt) or unrequested helper files.
-Room Schema Safety: Never edit existing exported schema JSONs (app/schemas/). Any entity change requires a proper Migration, version bump, and passing MigrationTest.kt.
-Dependencies: Do NOT add or upgrade libraries in gradle/libs.versions.toml or build.gradle.kts without explicit user approval.
-5. Agent Workflow, Reporting & Git Rules
-Autonomous Execution (Non-Coder Friendly): Execute all code edits, Gradle commands, test runs, and root-cause fixes autonomously. Never ask the user to manually edit code or read raw stacktraces. Report results in simple Hinglish.
-Ambiguity Gate: If requirements or UI/architecture choices are unclear, STOP before editing, present 4 distinct options + 1 clear recommendation, and wait for approval.
-No Skipped Tests: Never mark failing tests @Ignore or delete assertions to force a green build.
-Branch & PR Hygiene: After verification passes and secrets are checked (git status / git diff), push changes to a clean feat/... or fix/... branch and open a Pull Request with a simple Hinglish summary. Always ask for approval before merging PRs or deleting branches.
+This repository contains **Dua Gen AI**, consisting of:
+
+- **Dua** — fast chat, planning, intent detection, memory, task creation and task control.
+- **Dua Work** — coding, file operations, tests, execution, logs and task artifacts.
+
+The existing `dua-backend` is the source code being upgraded. This is an upgrade of the existing backend, not a clean-slate replacement.
+
+## Core Rules
+
+1. Do not permanently delete any existing file, folder or code without explicit approval.
+2. Edit, refactor and improve the existing implementation wherever possible.
+3. Do not create duplicate files, folders, routes, services or implementations.
+4. Before creating anything new, search the repository for an existing equivalent.
+5. If an existing file or folder is no longer active or needed, move it to `archive/` instead of deleting it.
+6. Do not move anything to `archive/` until its imports, routes, tests, scripts and deployment references have been checked.
+7. Do not change unrelated code or expand the scope of a task.
+8. Preserve existing public APIs unless the task explicitly requires a breaking change.
+9. Never invent behavior, configuration, credentials, test results or implementation details.
+
+## Change Workflow
+
+1. Inspect the repository structure and relevant files first.
+2. Read the applicable documentation and existing code before editing.
+3. Identify current routes, services, models, workers, tests and configuration.
+4. Make the smallest safe change that satisfies the requirement.
+5. Reuse existing utilities, types, services and patterns.
+6. Update imports and references when files are moved or renamed.
+7. Update documentation when behavior, setup or API contracts change.
+8. Run the relevant formatter, linter, type checker, build and tests.
+9. Review the final diff for accidental changes, duplicates and secrets.
+10. Report exactly what changed, what was tested and what could not be tested.
+
+## Archive Rules
+
+The `archive/` directory is for inactive code that must be preserved for review or possible restoration.
+
+Before moving an item to `archive/`:
+
+- Search for imports and references.
+- Check route registration and startup code.
+- Check test and build configuration.
+- Check deployment and CI/CD configuration.
+- Check documentation and scripts.
+- Confirm that no active code depends on it.
+
+For every archived item, add or update an archive note containing:
+
+- Original path
+- New archive path
+- Date of move
+- Reason for move
+- References checked
+- Restoration notes
+
+Archived code must not be imported by active production code.
+
+## Product Naming
+
+Use these names consistently:
+
+- `Dua Gen AI` — complete product/platform
+- `Dua` — chat and control-plane experience
+- `Dua Work` — execution and coding experience
+
+Do not introduce mixed or obsolete product names in new code or documentation.
+
+## Initial Control-Plane Actions
+
+The first stable actions are:
+
+- `direct_reply`
+- `create_task`
+- `get_task_status`
+- `stop_task`
+
+Each action must have clear validation, authorization, error handling and tests.
+
+## Task Requirements
+
+Every task should have:
+
+- A unique task ID
+- A clear status
+- Creation time and update time
+- Input or request metadata
+- Result or artifact reference when completed
+- Error information when failed
+- Cancellation or stop information when stopped
+- Timeout handling where applicable
+
+Recommended statuses:
+
+- `queued`
+- `running`
+- `completed`
+- `failed`
+- `stopped`
+- `timed_out`
+
+## API and Backend Safety
+
+- Validate all external input.
+- Authenticate and authorize protected operations.
+- Do not expose secrets in logs or responses.
+- Use consistent error responses.
+- Make task operations idempotent where practical.
+- Prevent unauthorized task access.
+- Apply timeouts and resource limits to execution work.
+- Keep execution work isolated from the chat/control plane.
+
+## Testing Requirements
+
+At minimum, test:
+
+- Direct replies
+- Task creation
+- Task status retrieval
+- Task stopping
+- Invalid input
+- Unauthorized access
+- Missing task IDs
+- Duplicate requests
+- Failed tasks
+- Timed-out tasks
+- Existing behavior that must remain unchanged
+
+Do not claim tests passed unless they were actually run.
+
+## Definition of Done
+
+A change is complete only when:
+
+- The requested behavior is implemented.
+- Existing code was reused where appropriate.
+- No duplicate implementation was introduced.
+- No unrelated files were changed.
+- Imports and references are valid.
+- Relevant tests, lint, type checks and build were run.
+- Documentation is updated when needed.
+- The final diff was reviewed.
+- Any remaining limitation is clearly reported.
