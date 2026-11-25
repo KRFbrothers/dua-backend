@@ -26,8 +26,9 @@ export async function handleOrhanTasks(request, { env = process.env, fetcher = f
   if (parts[0] !== 'api' || parts[1] !== 'orhan' || parts[2] !== 'tasks' || parts.length > 5) return noStore('Not found.', 404);
   const taskId = parts[3] || '';
   const action = parts[4] || '';
-  if (parts.length === 4 || (parts.length === 5 && !['start', 'continue', 'cancel', 'retry'].includes(action)) || (taskId && !UUID.test(taskId))) return noStore('Not found.', 404);
+  if ((parts.length === 5 && !['start', 'continue', 'cancel', 'retry'].includes(action)) || (taskId && !UUID.test(taskId))) return noStore('Not found.', 404);
   if (parts.length === 3 && !['GET', 'POST'].includes(request.method)) return noStore('Method not allowed.', 405);
+  if (parts.length === 4 && request.method !== 'GET') return noStore('Method not allowed.', 405);
   if (parts.length === 5 && request.method !== 'POST') return noStore('Method not allowed.', 405);
 
   let owner;
@@ -47,6 +48,7 @@ export async function handleOrhanTasks(request, { env = process.env, fetcher = f
     inflight.add(lockKey);
   }
   try {
+    if (request.method === 'GET' && taskId) return await loadResponse(db, taskId);
     if (request.method === 'GET') return await listTasks(db);
     if (parts.length === 3) return await createTask(request, db, owner, env, fetcher);
     if (action === 'start') return await startTask(db, owner.user.id, taskId);
@@ -124,7 +126,7 @@ async function startTask(db, ownerId, taskId) {
   const now = Date.now();
   const saved = await write(db, `?task_id=eq.${taskId}&status=eq.waiting`, 'PATCH', { status: 'running', error: null, started_at_ms: now, updated_at_ms: now });
   if (saved instanceof Response) return saved;
-  if (!saved) return noStore('This task is no longer waiting.', 409);
+  if (!saved) return await missingOrConflict(db, taskId, 'This task is no longer waiting.');
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -189,7 +191,7 @@ async function continueTask(db, taskId, env, fetcher, token) {
 async function cancelTask(db, taskId) {
   const saved = await write(db, `?task_id=eq.${taskId}&status=in.(waiting,running)`, 'PATCH', { status: 'cancelled', updated_at_ms: Date.now() });
   if (saved instanceof Response) return saved;
-  if (!saved) return noStore('This task can no longer be cancelled.', 409);
+  if (!saved) return await missingOrConflict(db, taskId, 'This task can no longer be cancelled.');
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -264,6 +266,12 @@ async function loadResponse(db, taskId) {
     if (error instanceof Response) return error;
     return noStore('Dua Agent is temporarily unavailable. Retry.', 502);
   }
+}
+
+// A conditional PATCH that matched no row: 404 when the owner has no such task, else 409.
+async function missingOrConflict(db, taskId, conflict) {
+  await load(db, taskId);
+  return noStore(conflict, 409);
 }
 
 async function write(db, query, method, body) {
