@@ -194,6 +194,69 @@ test('Phase 5B: DELETE /api/devices/:token removes registered device token', asy
   const delRes = await handleService(call('DELETE', '/api/devices/token-to-delete'), { env, fetcher });
   assert.equal(delRes.status, 204);
   assert.equal(db.deviceTokens.length, 0);
+
+  const missing = await handleService(call('DELETE', '/api/devices/token-to-delete'), { env, fetcher });
+  assert.equal(missing.status, 404);
+  assert.equal((await missing.json()).error, 'That device token was not found.');
+});
+
+test('Phase 5B: DELETE /api/devices/:token decodes an encoded FCM token once', async () => {
+  const db = database();
+  const fetcher = router(db.routes);
+  const token = 'abc/def+ghi:APA91b';
+  db.deviceTokens.push({
+    id: crypto.randomUUID(),
+    owner_id: UID,
+    token,
+    platform: 'android',
+    device_name: 'Phone',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  });
+
+  const delRes = await handleService(call('DELETE', '/api/devices/' + encodeURIComponent(token)), { env, fetcher });
+  assert.equal(delRes.status, 204);
+  assert.equal(db.deviceTokens.length, 0);
+
+  const sent = fetcher.calls.find(callItem => callItem.method === 'DELETE' && callItem.url.includes('/dua_device_tokens'));
+  assert.ok(sent);
+  assert.ok(sent.url.includes('token=eq.' + encodeURIComponent(token)));
+  assert.ok(sent.url.includes('token=eq.abc%2Fdef%2Bghi%3AAPA91b'));
+  assert.equal(sent.url.includes('%253A'), false);
+  assert.equal(sent.url.includes('%252F'), false);
+  assert.equal(sent.url.includes('%252B'), false);
+
+  const malformed = await handleService(call('DELETE', '/api/devices/%ZZ'), { env, fetcher });
+  assert.equal(malformed.status, 400);
+  assert.equal((await malformed.json()).error, 'Invalid token.');
+});
+
+test('Phase 5B: DELETE /api/devices/:token deletes a realistic FCM token encoded with %3A', async () => {
+  const db = database();
+  const fetcher = router(db.routes);
+  const token = 'cX9abc123:APA91bFakeToken';
+  db.deviceTokens.push({
+    id: crypto.randomUUID(),
+    owner_id: UID,
+    token,
+    platform: 'android',
+    device_name: 'Realme 14 Pro+ 5G',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  });
+
+  const delRes = await handleService(call('DELETE', '/api/devices/cX9abc123%3AAPA91bFakeToken'), { env, fetcher });
+  assert.equal(delRes.status, 204);
+  assert.equal(db.deviceTokens.some(row => row.token === token), false);
+  assert.equal(db.deviceTokens.length, 0);
+
+  const sent = fetcher.calls.find(callItem => callItem.method === 'DELETE' && callItem.url.includes('/dua_device_tokens'));
+  assert.ok(sent.url.includes('token=eq.cX9abc123%3AAPA91bFakeToken'));
+  assert.equal(sent.url.includes('%253A'), false);
+
+  const second = await handleService(call('DELETE', '/api/devices/cX9abc123%3AAPA91bFakeToken'), { env, fetcher });
+  assert.equal(second.status, 404);
+  assert.equal((await second.json()).error, 'That device token was not found.');
 });
 
 test('Phase 5B: Notifications — list notifications and mark as read', async () => {

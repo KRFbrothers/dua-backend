@@ -129,14 +129,19 @@ export async function handleNotifications(request, { env = process.env, fetcher 
       // DELETE /api/devices/:token
       if (parts.length === 3) {
         if (request.method !== 'DELETE') return noStore('Method not allowed.', 405);
-        const token = parts[2];
-        if (!token || token.length > 1000) return noStore('Invalid token.', 400);
+        let decodedToken;
+        try { decodedToken = decodeURIComponent(parts[2]); }
+        catch { return noStore('Invalid token.', 400); }
+        if (decodedToken.length < 1 || decodedToken.length > 1000) return noStore('Invalid token.', 400);
 
-        const response = await db('dua_device_tokens', `?token=eq.${encodeURIComponent(token)}&${ownerFilter}`, {
+        const response = await db('dua_device_tokens', `?token=eq.${encodeURIComponent(decodedToken)}&${ownerFilter}`, {
           method: 'DELETE',
           headers: { Prefer: 'return=representation' },
         });
         if (!response.ok) return upstreamFailure(response.status, 'Devices');
+        const removed = await rowsOf(response);
+        if (!removed) return noStore('Devices returned an invalid list.', 502);
+        if (!removed.length) return noStore('That device token was not found.', 404);
         return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
       }
 

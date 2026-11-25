@@ -453,7 +453,8 @@ export async function prepareConversationChat(request, data, { env = process.env
   // Phase 4A: Multi-Agent Group Chat — resolve assigned group agents & candidate agents
   let assignedAgentIds = [];
   try {
-    const groupRes = await fetcher(`${base}/rest/v1/dua_conversation_agents?select=agent_id&${conversationFilter}&order=added_at.asc`, {
+    const membershipFilter = `conversation_id=eq.${encodeURIComponent(conversationId)}&${ownerFilter}`;
+    const groupRes = await fetcher(`${base}/rest/v1/dua_conversation_agents?select=agent_id&${membershipFilter}&order=added_at.asc`, {
       method: 'GET',
       headers,
       redirect: 'error',

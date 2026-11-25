@@ -291,10 +291,19 @@ test('Phase 3: privacy boundary — group:<CONV_B> memory never leaks into CONV_
 
 // ─── Phase 4B: Collaborative Studios (Artifact Versions & Revise) ──────────────
 
-function studioStore() {
+function geminiRevision() {
+  return [url => url.includes(':generateContent'), async (url, init) => {
+    const prompt = JSON.parse(init.body).contents[0].parts[0].text;
+    const instruction = prompt.match(/Revision Instruction: ([^\n]+)/)?.[1] || '';
+    return Response.json({ candidates: [{ content: { parts: [{ text: `Revised document.\n${instruction}` }] } }] });
+  }];
+}
+
+function studioStore({ collideOnce = false, collisions = 0 } = {}) {
   const artifacts = [];
   const versions = [];
   let clock = Date.parse('2026-11-19T00:00:00Z');
+  let collisionsLeft = collisions || (collideOnce ? 1 : 0);
   const stamp = () => new Date(clock += 1000).toISOString();
 
   const routes = [
@@ -337,8 +346,14 @@ function studioStore() {
       }
       if (method === 'POST') {
         const body = JSON.parse(init.body);
+        const duplicate = versions.some(row => row.owner_id === body.owner_id && row.artifact_id === body.artifact_id && row.version_num === body.version_num);
+        if (duplicate) return Response.json({ code: '23505', message: 'duplicate key value' }, { status: 409 });
         const row = { id: crypto.randomUUID(), created_at: stamp(), ...body };
         versions.push(row);
+        if (collisionsLeft > 0) {
+          collisionsLeft -= 1;
+          return Response.json({ code: '23505', message: 'duplicate key value' }, { status: 409 });
+        }
         return Response.json([row], { status: 201 });
       }
       return Response.json([]);
@@ -371,7 +386,7 @@ test('Phase 4B: Collaborative Studios — GET /api/artifacts/:id/versions return
 
 test('Phase 4B: Collaborative Studios — POST /api/artifacts/:id/revise creates version 1 and version 2, updating size and timestamp', async () => {
   const { artifacts, versions, routes } = studioStore();
-  const fetcher = router(routes);
+  const fetcher = router([...routes, geminiRevision()]);
 
   // Seed artifact
   artifacts.push({ owner_id: UID, artifact_id: 'art_doc_2', title: 'Architecture Document', type: 'Code', timestamp: 'Today', size_bytes: 50, url: null, created_at_ms: 1000, updated_at_ms: 1000 });
@@ -382,6 +397,8 @@ test('Phase 4B: Collaborative Studios — POST /api/artifacts/:id/revise creates
   const json1 = await res1.json();
   assert.equal(json1.version.versionNum, 1);
   assert.match(json1.version.content, /Add system diagram notes/);
+  assert.equal(json1.version.content.includes('Updated content.'), false);
+  assert.equal(json1.version.promptNote, 'Add system diagram notes');
   assert.equal(versions.length, 1);
   assert.equal(artifacts[0].size_bytes > 0, true);
 
@@ -391,6 +408,7 @@ test('Phase 4B: Collaborative Studios — POST /api/artifacts/:id/revise creates
   const json2 = await res2.json();
   assert.equal(json2.version.versionNum, 2);
   assert.match(json2.version.content, /Add database schema/);
+  assert.equal(json2.version.content.includes('Updated content.'), false);
   assert.equal(versions.length, 2);
 
   // Check version history lists both in desc order
@@ -400,6 +418,85 @@ test('Phase 4B: Collaborative Studios — POST /api/artifacts/:id/revise creates
   assert.equal(listJson.versions.length, 2);
   assert.equal(listJson.versions[0].versionNum, 2);
   assert.equal(listJson.versions[1].versionNum, 1);
+});
+
+test('Phase 4B: revise returns 503 when Gemini is not configured', async () => {
+  const { artifacts, versions, routes } = studioStore();
+  const fetcher = router([
+    ...routes,
+    [url => url.includes(':generateContent'), () => { throw new Error('Gemini must not be called'); }],
+  ]);
+  artifacts.push({ owner_id: UID, artifact_id: 'art_doc_5', title: 'Notes', type: 'Code', timestamp: 'Today', size_bytes: 10, url: null, created_at_ms: 1000, updated_at_ms: 1000 });
+
+  const res = await handleService(call('POST', '/api/artifacts/art_doc_5/revise', { instruction: 'Rewrite the introduction' }), {
+    env: { ...env, GEMINI_API_KEY: '' },
+    fetcher,
+  });
+  assert.equal(res.status, 503);
+  assert.equal((await res.json()).error, 'AI revision is not configured on this server.');
+  assert.equal(versions.length, 0);
+  assert.equal(artifacts[0].size_bytes, 10);
+  assert.equal(artifacts[0].updated_at_ms, 1000);
+  const writes = fetcher.calls.filter(item =>
+    (item.method === 'POST' && item.url.includes('/dua_artifact_versions')) ||
+    (item.method === 'PATCH' && item.url.includes('/dua_artifacts')));
+  assert.equal(writes.length, 0);
+  assert.equal(fetcher.calls.some(item => item.url.includes(':generateContent')), false);
+});
+
+test('Phase 4B: revise does not save placeholder text when the model returns nothing', async () => {
+  const cases = [
+    ['empty text', () => Response.json({ candidates: [{ content: { parts: [{ text: '   ' }] } }] })],
+    ['non-OK', () => Response.json({ error: 'unavailable' }, { status: 503 })],
+    ['thrown request', () => { throw new Error('gemini down'); }],
+  ];
+  for (const [label, gemini] of cases) {
+    const { artifacts, versions, routes } = studioStore();
+    const fetcher = router([...routes, [url => url.includes(':generateContent'), gemini]]);
+    artifacts.push({ owner_id: UID, artifact_id: 'art_doc_3', title: 'Notes', type: 'Code', timestamp: 'Today', size_bytes: 10, url: null, created_at_ms: 1000, updated_at_ms: 1000 });
+
+    const res = await handleService(call('POST', '/api/artifacts/art_doc_3/revise', { instruction: 'Rewrite the introduction' }), { env, fetcher });
+    assert.equal(res.status, 502, label);
+    assert.equal((await res.json()).error, 'Artifact revision failed. Retry.', label);
+    assert.equal(versions.length, 0, label);
+    assert.equal(artifacts[0].size_bytes, 10, label);
+    assert.equal(artifacts[0].updated_at_ms, 1000, label);
+    const writes = fetcher.calls.filter(item =>
+      (item.method === 'POST' && item.url.includes('/dua_artifact_versions')) ||
+      (item.method === 'PATCH' && item.url.includes('/dua_artifacts')));
+    assert.equal(writes.length, 0, label);
+  }
+});
+
+test('Phase 4B: revise retries when the next version number collides', async () => {
+  const { artifacts, versions, routes } = studioStore({ collideOnce: true });
+  const fetcher = router([...routes, geminiRevision()]);
+  artifacts.push({ owner_id: UID, artifact_id: 'art_doc_4', title: 'Plan', type: 'Code', timestamp: 'Today', size_bytes: 10, url: null, created_at_ms: 1000, updated_at_ms: 1000 });
+
+  const res = await handleService(call('POST', '/api/artifacts/art_doc_4/revise', { instruction: 'Add the rollout plan' }), { env, fetcher });
+  assert.equal(res.status, 201);
+  const json = await res.json();
+  assert.equal(json.version.versionNum, 2);
+  assert.match(json.version.content, /Add the rollout plan/);
+  assert.equal(json.version.content.includes('Updated content.'), false);
+  assert.deepEqual(versions.map(row => row.version_num), [1, 2]);
+  const versionPosts = fetcher.calls.filter(item => item.method === 'POST' && item.url.includes('/dua_artifact_versions') && !item.url.includes('?'));
+  assert.equal(versionPosts.length, 2);
+});
+
+test('Phase 4B: revise returns 409 when the retried version insert still collides', async () => {
+  const { artifacts, versions, routes } = studioStore({ collisions: 2 });
+  const fetcher = router([...routes, geminiRevision()]);
+  artifacts.push({ owner_id: UID, artifact_id: 'art_doc_6', title: 'Plan', type: 'Code', timestamp: 'Today', size_bytes: 10, url: null, created_at_ms: 1000, updated_at_ms: 1000 });
+
+  const res = await handleService(call('POST', '/api/artifacts/art_doc_6/revise', { instruction: 'Add the rollout plan' }), { env, fetcher });
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).error, 'Failed to save artifact version.');
+  assert.equal(artifacts[0].size_bytes, 10);
+  assert.equal(artifacts[0].updated_at_ms, 1000);
+  const versionPosts = fetcher.calls.filter(item => item.method === 'POST' && item.url.endsWith('/dua_artifact_versions'));
+  assert.equal(versionPosts.length, 2);
+  assert.equal(fetcher.calls.some(item => item.method === 'PATCH' && item.url.includes('/dua_artifacts')), false);
 });
 
 test('Phase 4B: Collaborative Studios — versions and revise return 404 for nonexistent artifact', async () => {
