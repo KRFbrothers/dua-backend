@@ -169,3 +169,23 @@ test('cloud snapshots keep optional thinking fields and still accept old snapsho
   assert.throws(() => validateCloudSnapshot(chat([{ role: 'user', text: 'q', state: 'complete', thinking: 't' }])));
   assert.throws(() => validateCloudSnapshot(chat([{ role: 'model', text: 'a', state: 'complete', thinkingSeconds: -1 }])));
 });
+
+// Control-plane action `direct_reply` = POST /api/chat (API_CONTRACT.md "Orhan tasks" action table).
+test('direct_reply: POST /api/chat through the service answers directly and never creates a task', async () => {
+  const fetcher = mockFetch(geminiJson([{ text: 'Hi there' }]));
+  const response = await handleService(chatRequest(body()), { env, fetcher });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { text: 'Hi there' });
+  assert.equal(fetcher.calls.length, 1);
+  assert.doesNotMatch(fetcher.calls[0].url, /orhan|dua_orhan_tasks/);
+});
+
+test('direct_reply: invalid input through the service is a 400 JSON error before any provider call', async () => {
+  for (const bad of [{ model: 'Dua', messages: [] }, body({ mode: 'agent' }), body({ messages: [{ role: 'model', text: 'Last turn is not the user' }] })]) {
+    const fetcher = mockFetch();
+    const response = await handleService(chatRequest(bad), { env, fetcher });
+    assert.equal(response.status, 400);
+    assert.equal(typeof (await response.json()).error, 'string');
+    assert.equal(fetcher.calls.length, 0);
+  }
+});
