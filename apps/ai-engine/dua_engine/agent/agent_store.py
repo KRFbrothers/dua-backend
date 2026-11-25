@@ -5,7 +5,6 @@ uses a dedicated PostgreSQL database/role, never Cloud Run's temporary disk.
 Atomic claims are consumed before side effects; uncertain writes are not retried.
 """
 import hashlib
-import json
 import os
 import secrets
 import time

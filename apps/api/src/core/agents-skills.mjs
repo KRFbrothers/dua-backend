@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import { readJsonLimited } from './limited-json.mjs';
 import { resolveOwner, StorageError } from './storage.mjs';
 import { guardChatAccess } from './access-policy.mjs';
-import { buildRequest, extractReply } from './adapters.mjs';
+import { extractReply } from './adapters.mjs';
 import { dispatchPushNotification } from './notifications.mjs';
 
 const noStore = (error, status) => Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });

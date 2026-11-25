@@ -5,7 +5,6 @@ fallback. Vectors are persisted with model/dimension identity, not in process.
 Exact cosine search is intentionally bounded for this personal app; large-corpus
 approximate indexing is not implied. Hosted embeddings require explicit config.
 """
-import json
 import math
 import os
 import uuid
