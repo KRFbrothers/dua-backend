@@ -554,7 +554,7 @@ export async function handleAgentsSkills(request, { env = process.env, fetcher =
             const rows = await rowsOf(response);
             if (!rows || !rows.length) return noStore('That trigger was not found.', 404);
 
-            // Record notification and dispatch push notification asynchronously
+            // Push first, then record the real delivery status. Cloud Run stays awake until both finish.
             const notifRow = {
               owner_id: owner.user.id,
               conversation_id: rows[0].conversation_id || null,
@@ -562,25 +562,32 @@ export async function handleAgentsSkills(request, { env = process.env, fetcher =
               title: `Proactive Trigger: ${agentId}`,
               body: rows[0].prompt || 'Trigger executed',
               data: { triggerId, triggerType: rows[0].trigger_type },
-              status: 'sent',
-              sent_at: now,
+              status: 'pending',
+              sent_at: null,
               created_at: now,
             };
-            db('dua_notifications', '?select=*', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-              body: JSON.stringify(notifRow),
-            }).catch(() => {});
-
-            dispatchPushNotification({
+            const pushResult = await dispatchPushNotification({
               ownerId: owner.user.id,
               ownerToken: owner.token,
               notification: notifRow,
               env,
               fetcher,
+            }).catch(() => ({ dispatched: false, reason: 'dispatch_error', count: 0 }));
+            if (pushResult?.dispatched) {
+              notifRow.status = 'sent';
+              notifRow.sent_at = now;
+            } else if (pushResult?.reason === 'fcm_not_configured' || pushResult?.reason === 'no_devices_registered') {
+              notifRow.status = 'pending';
+            } else {
+              notifRow.status = 'failed';
+            }
+            await db('dua_notifications', '?select=*', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+              body: JSON.stringify(notifRow),
             }).catch(() => {});
 
-            return ok({ triggered: true, trigger: presentTrigger(rows[0]) });
+            return ok({ triggered: true, trigger: presentTrigger(rows[0]), push: pushResult });
           }
 
           return noStore('Not found.', 404);

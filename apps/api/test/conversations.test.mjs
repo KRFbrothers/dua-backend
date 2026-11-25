@@ -74,6 +74,8 @@ function database() {
     dua_conversation_agents: conversationAgents,
     dua_agents: customAgents,
   };
+  const restControls = new Set(['select', 'order', 'limit', 'offset', 'on_conflict']);
+  const conversationAgentColumns = new Set(['conversation_id', 'agent_id', 'owner_id', 'added_at']);
   const routes = [[url => url.startsWith(`${SUPA}/rest/v1/`), (url, init) => {
     const parsed = new URL(url);
     const table = parsed.pathname.split('/').pop();
@@ -81,6 +83,13 @@ function database() {
     const query = parsed.searchParams;
     const owner = ownerOf(init);
     const method = init.method || 'GET';
+    if (table === 'dua_conversation_agents') {
+      for (const name of query.keys()) {
+        if (!conversationAgentColumns.has(name) && !restControls.has(name)) {
+          return Response.json({ message: `column ${name} does not exist`, code: '42703' }, { status: 400 });
+        }
+      }
+    }
     if (method === 'GET') return Response.json(page(sort(filter(rows, query, owner), query.get('order')), query));
     if (method === 'POST') {
       const body = JSON.parse(init.body);
@@ -674,6 +683,50 @@ test('Phase 4A: Multi-Agent streaming chat tags events with agentId and saves tu
   assert.equal(db.messages[2].role, 'assistant');
   const agentIds = [db.messages[1].agent_id, db.messages[2].agent_id].sort();
   assert.deepEqual(agentIds, ['dua-agent', 'personal-agent']);
+});
+
+test('Phase 4A: group chat without a mention dispatches every assigned agent', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C1, agent_id: 'personal-agent' });
+  db.addConversationAgent(conv.id, 'personal-agent');
+  db.addConversationAgent(conv.id, 'dua-agent');
+
+  let callCount = 0;
+  const geminiRoutes = [
+    [url => url.includes(':generateContent'), () => {
+      callCount++;
+      return Response.json({
+        candidates: [{ content: { parts: [{ text: `Answer from agent ${callCount}` }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 3 }
+      });
+    }],
+  ];
+  const fetcher = router([...db.routes, ...geminiRoutes]);
+
+  const response = await handleService(call('POST', '/api/chat', {
+    model: 'Dua',
+    messages: [{ role: 'user', text: 'Please both weigh in on this plan' }],
+    conversation_id: conv.id,
+    stream: false,
+  }), { env, fetcher });
+
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.equal(data.replies.length, 2);
+  assert.deepEqual(data.replies.map(reply => reply.agentId), ['personal-agent', 'dua-agent']);
+  assert.equal(db.messages.length, 3);
+  assert.deepEqual([db.messages[1].agent_id, db.messages[2].agent_id], ['personal-agent', 'dua-agent']);
+
+  const membershipRead = fetcher.calls.find(call => call.method === 'GET' && call.url.includes('/rest/v1/dua_conversation_agents'));
+  assert.ok(membershipRead, 'group chat must read dua_conversation_agents');
+  assert.ok(membershipRead.url.includes(`conversation_id=eq.${conv.id}`));
+  assert.equal(/[?&]id=/.test(membershipRead.url), false);
+
+  const rejected = await fetcher(`${SUPA}/rest/v1/dua_conversation_agents?select=agent_id&id=eq.${conv.id}&owner_id=eq.${UID}`, {
+    method: 'GET',
+    headers: { authorization: 'Bearer user-token' },
+  });
+  assert.equal(rejected.status, 400);
 });
 
 test('Phase 4A: Multi-Agent non-streaming chat returns replies and saves turns', async () => {

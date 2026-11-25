@@ -249,57 +249,66 @@ export async function handleArtifactsMemories(request, { env = process.env, fetc
         });
         const latestRows = latestRes.ok ? await latestRes.json().catch(() => []) : [];
         const latestRow = Array.isArray(latestRows) && latestRows.length > 0 ? latestRows[0] : null;
-        const currentVersion = latestRow ? latestRow.version_num : 0;
         const currentContent = latestRow ? latestRow.content : `${currentArtifact.title}\n${currentArtifact.url || ''}`;
-        const nextVersion = currentVersion + 1;
 
-        // Perform revision via AI or fallback
+        // A missing key is a server configuration error, not an empty revision.
+        if (!env.GEMINI_API_KEY) return noStore('AI revision is not configured on this server.', 503);
+
         let revisedContent = '';
-        if (env.GEMINI_API_KEY) {
-          const model = env.GEMINI_MODEL || 'gemini-3.8-flash';
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
-          const prompt = `You are an AI artifact editor in a collaborative studio.\n\nCurrent Content:\n${currentContent}\n\nRevision Instruction: ${instruction}\n\nGenerate the complete revised content for this artifact. Return ONLY the revised content without any introductory or conversational remarks.`;
-          try {
-            const geminiRes = await fetcher(url, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                contents: [{ role: 'user', parts: [{ text: prompt }] }],
-                generationConfig: { maxOutputTokens: 8192, temperature: 0.3 },
-              }),
-              signal: AbortSignal.any([request.signal, AbortSignal.timeout(30000)]),
-            });
-            if (geminiRes.ok) {
-              const gJson = await geminiRes.json().catch(() => null);
-              revisedContent = gJson?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-            }
-          } catch {}
-        }
-        if (!revisedContent.trim()) {
-          revisedContent = `${currentContent}\n\n<!-- Revised with: ${instruction} -->\nUpdated content.`;
-        }
+        const model = env.GEMINI_MODEL || 'gemini-3.8-flash';
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+        const prompt = `You are an AI artifact editor in a collaborative studio.\n\nCurrent Content:\n${currentContent}\n\nRevision Instruction: ${instruction}\n\nGenerate the complete revised content for this artifact. Return ONLY the revised content without any introductory or conversational remarks.`;
+        try {
+          const geminiRes = await fetcher(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }],
+              generationConfig: { maxOutputTokens: 8192, temperature: 0.3 },
+            }),
+            signal: AbortSignal.any([request.signal, AbortSignal.timeout(30000)]),
+          });
+          if (geminiRes.ok) {
+            const gJson = await geminiRes.json().catch(() => null);
+            revisedContent = gJson?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+          }
+        } catch {}
+        if (!revisedContent.trim()) return noStore('Artifact revision failed. Retry.', 502);
 
-        // Save new version
-        const versionRow = {
-          artifact_id: id,
-          owner_id: owner.user.id,
-          version_num: nextVersion,
-          content: revisedContent,
-          prompt_note: instruction,
+        // Save new version. A 409 means another revise took that number: re-read once and retry once.
+        const versionUrl = `${base}/rest/v1/dua_artifact_versions?select=version_num&artifact_id=eq.${encodeURIComponent(id)}&owner_id=eq.${encodeURIComponent(owner.user.id)}&order=version_num.desc&limit=1`;
+        const insertNextVersion = async () => {
+          const freshRes = await fetcher(versionUrl, {
+            method: 'GET',
+            headers,
+            redirect: 'error',
+            signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]),
+          });
+          const freshRows = freshRes.ok ? await freshRes.json().catch(() => []) : [];
+          const freshVersion = Array.isArray(freshRows) && freshRows.length > 0 ? Number(freshRows[0].version_num) || 0 : 0;
+          return fetcher(`${base}/rest/v1/dua_artifact_versions`, {
+            method: 'POST',
+            headers: {
+              ...headers,
+              'Content-Type': 'application/json',
+              Prefer: 'return=representation',
+            },
+            body: JSON.stringify({
+              artifact_id: id,
+              owner_id: owner.user.id,
+              version_num: freshVersion + 1,
+              content: revisedContent,
+              prompt_note: instruction,
+            }),
+            redirect: 'error',
+            signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]),
+          });
         };
-        const saveVRes = await fetcher(`${base}/rest/v1/dua_artifact_versions`, {
-          method: 'POST',
-          headers: {
-            ...headers,
-            'Content-Type': 'application/json',
-            Prefer: 'return=representation',
-          },
-          body: JSON.stringify(versionRow),
-          redirect: 'error',
-          signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]),
-        });
+        let saveVRes = await insertNextVersion();
+        if (saveVRes.status === 409) saveVRes = await insertNextVersion();
+        if (saveVRes.status === 409) return noStore('Failed to save artifact version.', 409);
         if (!saveVRes.ok) return upstreamFailure(saveVRes.status);
-        const savedV = (await saveVRes.json().catch(() => []))?.[0];
+        const savedV = (await saveVRes.json().catch(() => []))?.[0] || null;
         if (!savedV) return noStore('Failed to save artifact version.', 502);
 
         // Update artifact updated_at_ms and size_bytes

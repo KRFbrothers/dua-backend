@@ -23,6 +23,8 @@ function database() {
   const skills = [];
   const instructions = [];
   const triggers = [];
+  const notifications = [];
+  const deviceTokens = [];
   let clock = Date.parse('2026-11-19T00:00:00Z');
   const stamp = () => new Date(clock += 1000).toISOString();
   const ownerOf = init => new Headers(init.headers).get('authorization') === 'Bearer user-token' ? UID : 'nobody';
@@ -54,6 +56,8 @@ function database() {
     dua_agent_skills: skills,
     dua_agent_instructions: instructions,
     dua_agent_triggers: triggers,
+    dua_notifications: notifications,
+    dua_device_tokens: deviceTokens,
   };
 
   const routes = [
@@ -142,7 +146,7 @@ function database() {
     }]
   ];
 
-  return { agents, skills, instructions, triggers, routes };
+  return { agents, skills, instructions, triggers, notifications, deviceTokens, routes };
 }
 
 test('starter skills load from dua_agent_prompts.json and official agents are defined', () => {
@@ -436,6 +440,7 @@ test('Phase 4C: Proactive Agents — Triggers CRUD & Run (GET, POST, PUT, DELETE
   const runJson = await runRes.json();
   assert.equal(runJson.triggered, true);
   assert.ok(runJson.trigger.lastRunAt);
+  assert.deepEqual(runJson.push, { dispatched: false, reason: 'fcm_not_configured', count: 0 });
 
   // 6. DELETE trigger
   const delRes = await handleService(call('DELETE', `/api/agents/dua-agent/triggers/${trigger.id}`), { env, fetcher });
@@ -445,6 +450,121 @@ test('Phase 4C: Proactive Agents — Triggers CRUD & Run (GET, POST, PUT, DELETE
   const emptyList = await handleService(call('GET', '/api/agents/dua-agent/triggers'), { env, fetcher });
   assert.equal(emptyList.status, 200);
   assert.equal((await emptyList.json()).triggers.length, 0);
+});
+
+test('Phase 4C: trigger run awaits the notification insert and FCM push before responding', async () => {
+  const db = database();
+  const fetcher = router(db.routes);
+  const created = await handleService(call('POST', '/api/agents/dua-agent/triggers', {
+    triggerType: 'schedule',
+    cronExpr: '0 9 * * 1-5',
+    prompt: 'Morning summary',
+  }), { env, fetcher });
+  const { trigger } = await created.json();
+  db.deviceTokens.push({ owner_id: UID, token: 'device-fcm-token', platform: 'android' });
+
+  let releasePush;
+  const pushGate = new Promise(resolve => { releasePush = resolve; });
+  let pushStarted;
+  const pushStartedGate = new Promise(resolve => { pushStarted = resolve; });
+  let releaseInsert;
+  const insertGate = new Promise(resolve => { releaseInsert = resolve; });
+  let insertStarted;
+  const insertStartedGate = new Promise(resolve => { insertStarted = resolve; });
+  let insertedBody = null;
+  let responded = false;
+  const gated = router([
+    [(url, init) => (init.method || 'GET') === 'POST' && url.includes('/rest/v1/dua_notifications'), async (url, init) => {
+      insertedBody = JSON.parse(init.body);
+      insertStarted();
+      await insertGate;
+      db.notifications.push(insertedBody);
+      return Response.json([insertedBody], { status: 201 });
+    }],
+    ...db.routes,
+    [url => url.includes('metadata.google.internal') || url.includes('oauth2.googleapis.com'), () => Response.json({ access_token: 'ya29.test', expires_in: 3600 })],
+    [url => url.includes('fcm.googleapis.com'), async () => {
+      pushStarted();
+      await pushGate;
+      return Response.json({ name: 'projects/dua-project/messages/1' });
+    }],
+  ]);
+
+  const pending = handleService(call('POST', `/api/agents/dua-agent/triggers/${trigger.id}/run`), {
+    env: { ...env, FCM_PROJECT_ID: 'dua-project', FCM_ACCESS_TOKEN: 'ya29.test' },
+    fetcher: gated,
+  }).then(response => {
+    responded = true;
+    return response;
+  });
+
+  await pushStartedGate;
+  assert.equal(responded, false);
+  assert.equal(db.notifications.length, 0);
+
+  releasePush();
+  await insertStartedGate;
+  assert.equal(responded, false);
+  assert.equal(db.notifications.length, 0);
+  assert.ok(gated.calls.some(item => item.url.includes('fcm.googleapis.com')));
+  assert.equal(insertedBody.status, 'sent');
+  assert.equal(insertedBody.sent_at, db.triggers.find(row => row.id === trigger.id).last_run_at);
+  assert.equal(insertedBody.data.triggerId, trigger.id);
+
+  releaseInsert();
+  const runRes = await pending;
+  assert.equal(responded, true);
+  assert.equal(runRes.status, 200);
+  const runJson = await runRes.json();
+  assert.equal(runJson.triggered, true);
+  assert.deepEqual(runJson.push, { dispatched: true, count: 1 });
+  assert.equal(db.notifications.length, 1);
+  assert.equal(db.notifications[0].owner_id, UID);
+  assert.equal(db.notifications[0].agent_id, 'dua-agent');
+  assert.equal(db.notifications[0].body, 'Morning summary');
+  assert.equal(db.notifications[0].data.triggerId, trigger.id);
+  assert.equal(db.notifications[0].status, 'sent');
+  assert.equal(db.notifications[0].sent_at, db.triggers.find(row => row.id === trigger.id).last_run_at);
+  const sent = gated.calls.find(item => item.url.includes('fcm.googleapis.com'));
+  assert.ok(sent);
+  assert.equal(sent.json.message.token, 'device-fcm-token');
+});
+
+test('Phase 4C: trigger notification status is pending or failed when push does not send', async () => {
+  const pendingDb = database();
+  const pendingFetcher = router(pendingDb.routes);
+  const created = await handleService(call('POST', '/api/agents/dua-agent/triggers', {
+    triggerType: 'webhook',
+    prompt: 'Pending summary',
+  }), { env, fetcher: pendingFetcher });
+  const pendingTrigger = (await created.json()).trigger;
+  const pendingRun = await handleService(call('POST', `/api/agents/dua-agent/triggers/${pendingTrigger.id}/run`), { env, fetcher: pendingFetcher });
+  assert.equal(pendingRun.status, 200);
+  assert.deepEqual((await pendingRun.json()).push, { dispatched: false, reason: 'fcm_not_configured', count: 0 });
+  assert.equal(pendingDb.notifications.length, 1);
+  assert.equal(pendingDb.notifications[0].status, 'pending');
+  assert.equal(pendingDb.notifications[0].sent_at, null);
+
+  const failedDb = database();
+  failedDb.deviceTokens.push({ owner_id: UID, token: 'device-fcm-token', platform: 'android' });
+  const failedFetcher = router([
+    ...failedDb.routes,
+    [url => url.includes('fcm.googleapis.com'), () => Response.json({ error: 'unavailable' }, { status: 500 })],
+  ]);
+  const failedCreated = await handleService(call('POST', '/api/agents/dua-agent/triggers', {
+    triggerType: 'webhook',
+    prompt: 'Failed summary',
+  }), { env, fetcher: failedFetcher });
+  const failedTrigger = (await failedCreated.json()).trigger;
+  const failedRun = await handleService(call('POST', `/api/agents/dua-agent/triggers/${failedTrigger.id}/run`), {
+    env: { ...env, FCM_PROJECT_ID: 'dua-project', FCM_ACCESS_TOKEN: 'ya29.test' },
+    fetcher: failedFetcher,
+  });
+  assert.equal(failedRun.status, 200);
+  assert.deepEqual((await failedRun.json()).push, { dispatched: false, count: 0 });
+  assert.equal(failedDb.notifications.length, 1);
+  assert.equal(failedDb.notifications[0].status, 'failed');
+  assert.equal(failedDb.notifications[0].sent_at, null);
 });
 
 test('Phase 4C: Proactive Agents — Validation & 404s for nonexistent agents or invalid triggers', async () => {
