@@ -5,6 +5,10 @@ This repository contains **Dua Gen AI**, consisting of:
 
 The existing `dua-backend` is the source code being upgraded. This is an upgrade of the existing backend, not a clean-slate replacement.
 
+## Project Docs
+
+- [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md) — approved backend roadmap and owner decisions.
+
 ## Core Rules
 
 1. Do not permanently delete any existing file, folder or code without explicit approval.

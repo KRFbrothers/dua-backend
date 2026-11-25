@@ -133,9 +133,26 @@ A change is ready for review when:
 - The diff was reviewed.
 - Known limitations are clearly stated.
 
+## Stack and Commands
+
+| Path | What it is | Checks (same as CI, `.github/workflows/checks.yml`) |
+|---|---|---|
+| `apps/api/` | Node.js 24 HTTP API (`dua-api` on Cloud Run) | `cd apps/api && npm ci && npm test` |
+| `apps/ai-engine/` | Python Flask/ADK engine (`dua-ai-engine` on Cloud Run) | `python -m pytest -q apps/ai-engine/tests` (from the repository root) |
+| `supabase/` | Supabase CLI workspace and SQL migrations | see `SUPABASE.md`; never `db push` without owner approval |
+| `packages/contracts/` | Shared kill-switch contract read by both services' tests | covered by the two test suites above |
+
+No formatter, linter, type checker or separate build step is configured in this repository yet; the test suites above are the checks CI runs. Deploys are manual and need owner approval.
+
+## Project Docs
+
+- [`AGENTS.md`](AGENTS.md) — rules for agents working in this repository.
+- [`API_CONTRACT.md`](API_CONTRACT.md) — public HTTP API of `dua-api` and `dua-ai-engine`.
+- [`SUPABASE.md`](SUPABASE.md) — Supabase setup, migrations and data rules.
+- [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md) — approved backend roadmap and owner decisions.
+- [`packages/contracts/KILL_SWITCHES.md`](packages/contracts/KILL_SWITCHES.md) — kill-switch contract.
+- [`SECURITY.md`](SECURITY.md) — security policy.
+
 ## License
 
-Add the project license here.
-```
-
-**Assumption:** maine technology-specific commands, API routes aur environment variables intentionally generic rakhe hain, kyunki repository ka actual stack aur structure yahan available nahi hai.
+GPL-3.0-or-later. See [`LICENSE`](LICENSE) and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
