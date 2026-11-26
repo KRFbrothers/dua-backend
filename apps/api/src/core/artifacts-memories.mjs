@@ -17,6 +17,7 @@
 // - Background auto-extraction: extracts durable facts from chat turns non-blockingly.
 import { readJsonLimited } from './limited-json.mjs';
 import { resolveOwner, StorageError } from './storage.mjs';
+import { searchPattern } from './conversations.mjs';
 
 const noStore = (error, status) => Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
 const ok = (body, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -342,6 +343,8 @@ export async function handleArtifactsMemories(request, { env = process.env, fetc
       if (resource.table === 'dua_memories') {
         const scopeParam = url.searchParams.get('scope');
         const convParam = url.searchParams.get('conversation_id') || url.searchParams.get('conversationId');
+        const pattern = searchPattern(url.searchParams.get('q'));
+        if (pattern === null) return noStore('Invalid q.', 400);
         if (convParam) {
           if (!UUID_REGEX.test(convParam)) return noStore('Invalid conversation_id.', 400);
           // Privacy boundary: retrieve global + current thread memories only
@@ -349,6 +352,12 @@ export async function handleArtifactsMemories(request, { env = process.env, fetc
         } else if (scopeParam) {
           if (!SCOPE_REGEX.test(scopeParam)) return noStore('Invalid scope.', 400);
           filter += `&scope=eq.${encodeURIComponent(scopeParam)}`;
+        }
+        if (pattern) {
+          // Title or summary, matched literally. The value is double-quoted for PostgREST's or=(),
+          // so commas and parentheses are safe; `\` and `"` are escaped for the quoted form.
+          const quoted = `"${pattern.replace(/[\\"]/g, match => '\\' + match)}"`;
+          filter += `&or=${encodeURIComponent(`(title.ilike.${quoted},summary.ilike.${quoted})`)}`;
         }
       }
 

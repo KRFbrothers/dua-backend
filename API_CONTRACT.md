@@ -164,7 +164,7 @@ Owner-only relational chat history (`dua_conversations`, `dua_messages`). The AP
 }
 ```
 
-For older messages, pass the first message's `createdAt` as `before`. `POST /api/chat` accepts an optional `conversation_id`: it saves the user turn before generation starts, and saves the assistant turn with `agent_id`, `model` and usage on completion (PR D).
+For older messages, pass the first message's `createdAt` as `before`. `POST /api/chat` accepts an optional `conversation_id`: it saves the user turn before generation starts, and saves the assistant turn with `agent_id`, `model` and usage on completion (PR D). The user turn is written only after every request check passes, so a refused request (`4xx`/`503`) leaves no message behind. An explicit `agent_id` must be an official agent (`personal-agent`, `dua-agent`) or one of the owner's agents, otherwise `400` `Unknown agent_id.`; without it the conversation's agent is used. `model` holds the provider model id that answered (for example `gemini-…`), not the picker label. If the reply was generated but saving it fails, the reply is still delivered: a stream sends a `notice` event and then `done`, and a JSON reply is `200` with its text plus `notice` (group replies also carry `notice` on the affected `replies[]` entry).
 
 **Multi-Agent Group Chat & @mention (Phase 4A):**
 - A conversation can have multiple participating agents via `dua_conversation_agents`.
@@ -217,11 +217,13 @@ Owner-only persistent memory (`dua_memories`). The API uses the owner's token an
 
 **Auto-extraction:** After each assistant reply inside a `conversation_id` chat, the server non-blockingly extracts up to 2 durable facts/preferences from the turn and saves them as `global` or `group:<conversation_id>` memories. The extraction is silent on failure.
 
+**Two separate stores, by design:** `dua_memories` is the app's user-visible, user-approved Memory (this API, the Memory screen, `/api/chat` context injection). The Python engine's `agent_notes` table holds the Dua Agent's own self-learning notes, used by the engine's agent tools (plus its `/api/agent/notes/reindex` and `/api/agent/notes/status` maintenance routes); it is not served or merged by these Memory endpoints. Neither store reads or writes the other.
+
 **Context injection:** On every `/api/chat` with a `conversation_id`, the server prepends top-10 relevant memories (`global` + `group:<conversation_id>`) into the model's context. Privacy rule is strict: `group:<other_id>` memories are **never** injected.
 
 | Method and path | Request | Response |
 |---|---|---|
-| `GET /api/memories` | `?scope=global\|group:<uuid>` or `?conversation_id=<uuid>` (optional filters) | `{ "memories": [ memory ] }`, newest first |
+| `GET /api/memories` | `?scope=global\|group:<uuid>` or `?conversation_id=<uuid>` (optional filters), plus optional `?q=` (up to 100 characters, matched literally in `title` or `summary`, case-insensitive; longer is `400` `Invalid q.`) | `{ "memories": [ memory ] }`, newest first |
 | `POST /api/memories` | `{ "id"?: "mem_...", "title": "", "summary"?: "", "timestamp"?: "", "category"?: "", "url"?: null, "scope"?: "global" }` | `201` `{ "memory": memory }` |
 | `PUT /api/memories/:id` | `{ "scope"?: "global"\|"group:<uuid>", "sourceConversationId"?: null\|"uuid", "title"?: "", "summary"?: "", "category"?: "", "url"?: null }` | `{ "memory": memory }`. Toggles scope and updates fields. `404` when not found |
 | `DELETE /api/memories/:id` | none | `204`, `404` when not found |
