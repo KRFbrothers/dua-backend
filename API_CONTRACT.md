@@ -184,7 +184,7 @@ Owner-only persistent artifacts and versioned revision history (`dua_artifacts`,
 | `POST /api/artifacts` | `{ "id"?: "art_...", "title": "", "type"?: "", "timestamp"?: "", "sizeBytes"?: 0, "url"?: "" }` | `201` `{ "artifact": artifact }` |
 | `DELETE /api/artifacts/:id` | none | `204`, `404` when not found |
 | `GET /api/artifacts/:id/versions` | none | `{ "versions": [ version ] }`, newest `versionNum` first |
-| `POST /api/artifacts/:id/revise` | `{ "instruction": "Make the header bold and add intro" }` | `201` `{ "artifact": artifact, "version": version }`. Automatically revisions content via AI or fallback and increments `versionNum` |
+| `POST /api/artifacts/:id/revise` | `{ "instruction": "Make the header bold and add intro" }` | `201` `{ "artifact": artifact, "version": version }`. Writes the next version with AI and increments `versionNum`. When the artifact has no version yet, `instruction` is the first draft and version 1 is that document. A missing `GEMINI_API_KEY` is `503`. An empty model reply is `502` and saves nothing |
 
 ```json
 {

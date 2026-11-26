@@ -453,6 +453,30 @@ test('Phase 4B: Collaborative Studios — POST /api/artifacts/:id/revise creates
   assert.equal(listJson.versions[1].versionNum, 1);
 });
 
+test('Phase 4B: the first revise writes a document from the instruction', async () => {
+  const { artifacts, versions, routes } = studioStore();
+  let prompt = '';
+  const fetcher = router([
+    ...routes,
+    [url => url.includes(':generateContent'), async (_url, init) => {
+      prompt = JSON.parse(init.body).contents[0].parts[0].text;
+      return Response.json({ candidates: [{ content: { parts: [{ text: 'A full page about the school project.' }] } }] });
+    }],
+  ]);
+  artifacts.push({ owner_id: UID, artifact_id: 'art_doc_7', title: 'School', type: 'Document', timestamp: 'Today', size_bytes: 0, url: null, created_at_ms: 1000, updated_at_ms: 1000 });
+
+  const res = await handleService(call('POST', '/api/artifacts/art_doc_7/revise', { instruction: 'Ek page school project' }), { env, fetcher });
+  assert.equal(res.status, 201);
+  assert.match(prompt, /first version/);
+  assert.match(prompt, /Revision Instruction: Ek page school project/);
+  assert.equal(prompt.includes('Current Content:'), false);
+  const json = await res.json();
+  assert.equal(json.version.versionNum, 1);
+  assert.equal(json.version.content, 'A full page about the school project.');
+  assert.equal(versions.length, 1);
+  assert.equal(artifacts[0].type, 'Document');
+});
+
 test('Phase 4B: revise returns 503 when Gemini is not configured', async () => {
   const { artifacts, versions, routes } = studioStore();
   const fetcher = router([

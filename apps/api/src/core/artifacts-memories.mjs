@@ -250,7 +250,8 @@ export async function handleArtifactsMemories(request, { env = process.env, fetc
         });
         const latestRows = latestRes.ok ? await latestRes.json().catch(() => []) : [];
         const latestRow = Array.isArray(latestRows) && latestRows.length > 0 ? latestRows[0] : null;
-        const currentContent = latestRow ? latestRow.content : `${currentArtifact.title}\n${currentArtifact.url || ''}`;
+        const firstDraft = !latestRow;
+        const currentContent = latestRow ? latestRow.content : '';
 
         // A missing key is a server configuration error, not an empty revision.
         if (!env.GEMINI_API_KEY) return noStore('AI revision is not configured on this server.', 503);
@@ -258,7 +259,11 @@ export async function handleArtifactsMemories(request, { env = process.env, fetc
         let revisedContent = '';
         const model = env.GEMINI_MODEL || 'gemini-3.8-flash';
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
-        const prompt = `You are an AI artifact editor in a collaborative studio.\n\nCurrent Content:\n${currentContent}\n\nRevision Instruction: ${instruction}\n\nGenerate the complete revised content for this artifact. Return ONLY the revised content without any introductory or conversational remarks.`;
+        // The "Revision Instruction:" line stays on the first draft too. Tests and
+        // later revisions both read the user's words from that label.
+        const prompt = firstDraft
+          ? `You are writing the first version of a document in a collaborative studio.\n\nThere is no saved document yet. Write the complete document from the instruction below. Use clear headings and plain text.\n\nRevision Instruction: ${instruction}\n\nGenerate the complete document. Return ONLY the document without any introductory or conversational remarks.`
+          : `You are an AI artifact editor in a collaborative studio.\n\nCurrent Content:\n${currentContent}\n\nRevision Instruction: ${instruction}\n\nGenerate the complete revised content for this artifact. Return ONLY the revised content without any introductory or conversational remarks.`;
         try {
           const geminiRes = await fetcher(url, {
             method: 'POST',
