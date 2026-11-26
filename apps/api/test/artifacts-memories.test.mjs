@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleService } from '../src/server/service-handler.mjs';
+import { triggerMemoryAutoExtraction } from '../src/core/artifacts-memories.mjs';
 import { filesEnv, router, SUPA, UID, OTHER } from './files-helpers.mjs';
 
 const env = filesEnv;
@@ -326,6 +327,9 @@ test('PR D: an over-long memory q is refused with 400 before any database call',
 
 function geminiRevision() {
   return [url => url.includes(':generateContent'), async (url, init) => {
+    // The Gemini key travels only in the x-goog-api-key header, never in the URL.
+    assert.equal(new URL(url).search, '');
+    assert.equal(new Headers(init.headers).get('x-goog-api-key'), env.GEMINI_API_KEY);
     const prompt = JSON.parse(init.body).contents[0].parts[0].text;
     const instruction = prompt.match(/Revision Instruction: ([^\n]+)/)?.[1] || '';
     return Response.json({ candidates: [{ content: { parts: [{ text: `Revised document.\n${instruction}` }] } }] });
@@ -541,4 +545,21 @@ test('Phase 4B: Collaborative Studios — versions and revise return 404 for non
 
   const postRes = await handleService(call('POST', '/api/artifacts/art_nonexistent/revise', { instruction: 'Update' }), { env, fetcher });
   assert.equal(postRes.status, 404);
+});
+
+test('memory auto-extraction sends the Gemini key only in the x-goog-api-key header', async () => {
+  let seen;
+  const called = new Promise(resolve => { seen = resolve; });
+  const fetcher = async (url, init = {}) => {
+    if (String(url).includes(':generateContent')) {
+      seen({ url: String(url), key: new Headers(init.headers).get('x-goog-api-key') });
+      return Response.json({ candidates: [{ content: { parts: [{ text: '{"memories":[]}' }] } }] });
+    }
+    return Response.json([]);
+  };
+  triggerMemoryAutoExtraction({ userText: 'I prefer TypeScript', assistantText: 'Noted.', owner: { user: { id: UID }, token: 'user-token' }, env, fetcher });
+  const call = await called;
+  assert.equal(call.url, `https://generativelanguage.googleapis.com/v1beta/models/${env.GEMINI_MODEL}:generateContent`);
+  assert.equal(call.key, env.GEMINI_API_KEY);
+  assert.equal(call.url.includes(env.GEMINI_API_KEY), false);
 });

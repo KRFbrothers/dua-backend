@@ -11,6 +11,7 @@ function configuration(env){
  try{if(JSON.parse(Buffer.from(key.split('.')[1]||'','base64url').toString()).role==='service_role')return null;}catch{}
  return {url,key};
 }
+// Unverified decode on purpose: this only classifies an operator-configured env key, never a client token. Do not use it for auth decisions.
 function privilegedKey(value){
  if(typeof value!=='string'||value.length>10000)return null;
  if(/^sb_secret_[A-Za-z0-9_-]+$/.test(value))return value;

@@ -135,6 +135,9 @@ function database() {
       return Response.json({ error: 'unexpected method' }, { status: 500 });
     }],
     [url => url.includes('generativelanguage.googleapis.com'), (url, init) => {
+      // The Gemini key travels only in the x-goog-api-key header, never in the URL.
+      if (new URL(url).search !== '' || new Headers(init.headers).get('x-goog-api-key') !== env.GEMINI_API_KEY)
+        return Response.json({ error: 'Gemini key must be sent only in the x-goog-api-key header' }, { status: 400 });
       const body = JSON.parse(init.body);
       const text = body.contents?.[0]?.parts?.[0]?.text || '';
       if (text.includes('system prompt')) {

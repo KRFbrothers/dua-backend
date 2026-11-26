@@ -22,6 +22,7 @@ export function storageConfig(env = {}) {
   const enabled = valid && publicKey && /^[a-z0-9][a-z0-9_-]{2,62}$/.test(bucket) && String(env.DUA_FILES ?? '').trim() !== '0';
   return { enabled, url, key, bucket, maxBytes };
 }
+// Unverified decode on purpose: this only classifies an operator-configured env key, never a client token. Do not use it for auth decisions.
 function isServiceRoleJwt(key) {
   try { return JSON.parse(Buffer.from(key.split('.')[1] || '', 'base64url').toString()).role === 'service_role'; } catch { return false; }
 }

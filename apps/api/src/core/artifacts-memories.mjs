@@ -257,12 +257,13 @@ export async function handleArtifactsMemories(request, { env = process.env, fetc
 
         let revisedContent = '';
         const model = env.GEMINI_MODEL || 'gemini-3.8-flash';
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
         const prompt = `You are an AI artifact editor in a collaborative studio.\n\nCurrent Content:\n${currentContent}\n\nRevision Instruction: ${instruction}\n\nGenerate the complete revised content for this artifact. Return ONLY the revised content without any introductory or conversational remarks.`;
         try {
+          // The key goes in a header, never in the URL, so it cannot leak through logged URLs.
           const geminiRes = await fetcher(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
             body: JSON.stringify({
               contents: [{ role: 'user', parts: [{ text: prompt }] }],
               generationConfig: { maxOutputTokens: 8192, temperature: 0.3 },
@@ -509,7 +510,7 @@ export function triggerMemoryAutoExtraction({ userText, assistantText, conversat
   if (!base || !key || !geminiKey) return;
 
   const model = env.GEMINI_MODEL || 'gemini-3.8-flash';
-  const extractUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(geminiKey)}`;
+  const extractUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 
   queueMicrotask(async () => {
     try {
@@ -517,7 +518,7 @@ export function triggerMemoryAutoExtraction({ userText, assistantText, conversat
 
       const res = await fetcher(extractUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': geminiKey },
         body: JSON.stringify({
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
           generationConfig: { maxOutputTokens: 512, temperature: 0.2 },
