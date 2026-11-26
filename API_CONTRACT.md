@@ -84,6 +84,8 @@ Local default: `http://127.0.0.1:3000`. JSON body unless a row says otherwise.
 | `DELETE /api/cloud` | `{ "expectedRevision": 0, "expectedAccountId": "uuid" }` | same write shape, snapshot cleared |
 | `DELETE /api/cloud/chat` | `{ "expectedRevision": 0, "expectedAccountId": "uuid", "chatId": "", "confirmation": "DELETE CHAT" }` | `{ "ownerId": "", "chatId": "", "revision": 0, "deletedChatIds": [], "deleted": true }` |
 
+On production and Cloud Run, email login, signup, Google sign-in, refresh, password change, and password reset return `429` with `Retry-After` after 10 attempts in a minute for the same email and client address. `DUA_AUTH_MINUTE_LIMIT` changes that cap.
+
 Cloud snapshot JSON is `format: "dua-cloud-snapshot"`, `version: 1`, plus `chats` and `memory`.
 
 ### Setup and config

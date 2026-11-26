@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { MAX_REQUEST_BYTES } from '../core/attachments.mjs';
-import { handleService } from './service-handler.mjs';
+import { handleService, SECURITY_HEADERS } from './service-handler.mjs';
 import { ownerLockProblem } from '../core/access-policy.mjs';
 
 /** Origin of the incoming request. Cloud Run reports the scheme in X-Forwarded-Proto. */
@@ -12,7 +12,7 @@ function requestOrigin(headers) {
 }
 
 function json(res, code, data) {
-  res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...SECURITY_HEADERS });
   res.end(JSON.stringify(data));
 }
 

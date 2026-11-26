@@ -30,3 +30,4 @@ export class RequestRateLimiter {
 }
 
 export const chatRateLimiter = new RequestRateLimiter();
+export const authRateLimiter = new RequestRateLimiter();
