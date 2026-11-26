@@ -1,4 +1,4 @@
-// Orhan tasks share the owner's Supabase login. Dua chat is a different route.
+// Dua Work tasks (legacy Orhan routes and table) share the owner's Supabase login. Dua chat is a different route.
 // The engine plans and runs one step. This API saves the task so a closed app can resume it.
 import { readJsonLimited } from './limited-json.mjs';
 import { resolveOwner, StorageError } from './storage.mjs';
@@ -424,6 +424,6 @@ function engineUrl(env, path) {
 
 function upstreamFailure(status) {
   if (status === 401 || status === 403) return noStore('Session expired. Sign in again to use Dua Agent.', status);
-  if (status === 404 || status === 400) return noStore('Dua Agent task storage is not installed. Apply the Dua Orhan tasks migration.', 503);
+  if (status === 404 || status === 400) return noStore('Dua Agent task storage is not installed. Apply the dua_orhan_tasks migration.', 503);
   return noStore('Dua Agent is temporarily unavailable. Retry.', 502);
 }

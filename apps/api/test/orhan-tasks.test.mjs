@@ -132,6 +132,15 @@ test('waiting work can be cancelled and a signed-out request does not touch stor
   assert.equal(signedOut.calls.length, 0);
 });
 
+test('missing Dua Work task storage (404) returns 503 with the dua_orhan_tasks migration hint', async () => {
+  const fetcher = router([[url => url.startsWith(SUPA + '/rest/v1/dua_orhan_tasks'), () => Response.json({ message: 'relation does not exist' }, { status: 404 })]]);
+  const response = await handleService(call('GET', '/api/orhan/tasks'), { env, fetcher });
+  assert.equal(response.status, 503);
+  const { error } = await response.json();
+  assert.equal(error, 'Dua Agent task storage is not installed. Apply the dua_orhan_tasks migration.');
+  assert.doesNotMatch(error, /Dua Orhan/);
+});
+
 test('the agent switch refuses Orhan before any storage call', async () => {
   const fetcher = router([]);
   const response = await handleService(call('POST', '/api/orhan/tasks', { prompt: 'Research competitors' }), { env: { ...env, DUA_DISABLE_AGENT: '1' }, fetcher });

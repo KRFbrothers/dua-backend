@@ -132,7 +132,7 @@ Apply `supabase/migrations/202611190001_dua_conversations_messages.sql` once, us
 
 `dua-api` reads and writes these tables only with the signed-in owner's token and the anon key (`/api/conversations`, see [API_CONTRACT.md](API_CONTRACT.md)). The `service_role` table grant exists only for the scheduled backup job; the API never uses it here. Nothing is copied from `dua_cloud_snapshots`, and `/api/cloud` is unchanged.
 
-## 1f. Orhan task lifecycle
+## 1f. Dua Work task lifecycle (`dua_orhan_tasks`)
 
 Apply `supabase/migrations/202611250001_dua_orhan_tasks_lifecycle.sql` after `202611090001_dua_orhan_tasks.sql`, using the [CLI workspace](#repository-paths-and-cli-workspace) workflow (`db push` only after explicit owner approval). It is safe to run again. It:
 

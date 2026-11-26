@@ -57,7 +57,7 @@ The first stable control-plane actions are:
 
 After these actions are reliable, the project can expand into execution workers, tools, files, browser operations, memory improvements and advanced agent workflows.
 
-In this repository the actions map onto existing `dua-api` routes. Tasks are the existing Orhan tasks (`apps/api/src/core/orhan-tasks.mjs`, table `dua_orhan_tasks`). Request and response details are in [API_CONTRACT.md](API_CONTRACT.md#orhan-tasks).
+In this repository the actions map onto existing `dua-api` routes. Tasks are Dua Work tasks, stored as the legacy Orhan tasks (`apps/api/src/core/orhan-tasks.mjs`, table `dua_orhan_tasks`). Request and response details are in [API_CONTRACT.md](API_CONTRACT.md#dua-work-tasks-legacy-orhan-routes).
 
 | Action | Route | Notes |
 |---|---|---|
