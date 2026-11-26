@@ -50,6 +50,12 @@ function database() {
     for (const name of ['id', 'owner_id', 'conversation_id', 'agent_id']) if (query.has(name) && row[name] !== eq(query, name)) return false;
     if (query.has('title') && !ilike(query.get('title').replace(/^ilike\./, '')).test(row.title)) return false;
     if (query.has('created_at') && !(row.created_at < query.get('created_at').replace(/^lt\./, ''))) return false;
+    if (query.has('or')) {
+      // Only the messages tie-breaker shape: (created_at.lt."T",and(created_at.eq."T",id.lt.ID))
+      const tie = /^\(created_at\.lt\."([^"]+)",and\(created_at\.eq\."\1",id\.lt\.([0-9a-f-]{36})\)\)$/.exec(query.get('or'));
+      if (!tie) throw new Error('Unexpected or filter ' + query.get('or'));
+      if (!(row.created_at < tie[1] || (row.created_at === tie[1] && row.id < tie[2]))) return false;
+    }
     return true;
   });
   const sort = (rows, order) => {
@@ -113,9 +119,11 @@ function database() {
       rows.push(row);
       if (table === 'dua_messages') {
         const conv = conversations.find(c => c.id === row.conversation_id && c.owner_id === row.owner_id);
+        // Mirrors dua_messages_touch_conversation (202611260002): recency is the max, and the preview
+        // only follows a row at least as new as last_message_at.
         if (conv) {
-          conv.last_message_at = row.created_at;
-          conv.last_message_preview = (row.content || '').replace(/\s+/g, ' ').slice(0, 200);
+          if (row.created_at >= conv.last_message_at) conv.last_message_preview = (row.content || '').replace(/\s+/g, ' ').slice(0, 200);
+          if (row.created_at > conv.last_message_at) conv.last_message_at = row.created_at;
         }
       }
       return Response.json([row], { status: 201 });
@@ -329,6 +337,9 @@ test('messages: owner-checked, oldest-first pages with a before cursor and hasMo
   const query = new URL(fetcher.find(SUPA + '/rest/v1/dua_messages').at(-1).url).searchParams;
   assert.equal(query.get('owner_id'), 'eq.' + UID);
   assert.equal(query.get('order'), 'created_at.desc,id.desc');
+  // before-only requests are byte-identical to the pre-beforeId shape.
+  assert.equal(fetcher.find(SUPA + '/rest/v1/dua_messages').at(-1).url,
+    `${SUPA}/rest/v1/dua_messages?select=id,conversation_id,agent_id,role,content,model,token_count,usage,created_at&conversation_id=eq.${C1}&owner_id=eq.${UID}&created_at=lt.${encodeURIComponent(rows[1].created_at)}&order=created_at.desc,id.desc&limit=3`);
 
   const other = await handleService(call('GET', `/api/conversations/${C2}/messages`), { env, fetcher });
   assert.equal(other.status, 404);
@@ -886,4 +897,80 @@ test('PR D: usageTokenCount is the single token_count rule', () => {
   assert.equal(usageTokenCount({ totalTokens: -1, inputTokens: 'x' }), null);
   assert.equal(usageTokenCount(null), null);
   assert.equal(usageTokenCount(undefined), null);
+});
+
+// ─── PR D-fix-2: beforeId tie-breaker and the preview guard migration ────────
+
+test('PR D-fix-2: before + beforeId pages through messages that share one created_at', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C1 });
+  const same = '2026-11-20T10:00:00.123456+00:00';
+  const ids = ['10000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000004'];
+  ids.forEach((id, n) => db.addMessage(conv, { id, content: 't' + (n + 1), created_at: same }));
+  const fetcher = router(db.routes);
+  const get = path => handleService(call('GET', `/api/conversations/${C1}/messages?` + path), { env, fetcher }).then(r => r.json());
+
+  const first = await get('limit=2');
+  assert.deepEqual(first.messages.map(m => m.content), ['t3', 't4']);
+  const cursor = first.messages[0];
+  const tieOnly = await get(`limit=2&before=${encodeURIComponent(cursor.createdAt)}`);
+  assert.deepEqual(tieOnly.messages, [], 'before alone skips same-time rows (the old caveat)');
+  const next = await get(`limit=2&before=${encodeURIComponent(cursor.createdAt)}&beforeId=${cursor.id.toUpperCase()}`);
+  assert.deepEqual(next.messages.map(m => m.content), ['t1', 't2']);
+  assert.equal(next.hasMore, false);
+
+  const query = new URL(fetcher.find(SUPA + '/rest/v1/dua_messages').at(-1).url).searchParams;
+  assert.equal(query.get('or'), `(created_at.lt."${same}",and(created_at.eq."${same}",id.lt.${ids[2]}))`);
+  assert.equal(query.has('created_at'), false);
+  assert.equal(query.get('order'), 'created_at.desc,id.desc');
+});
+
+test('PR D-fix-2: beforeId needs before and must be a UUID, refused before any database call', async () => {
+  const fetcher = router([]);
+  const cases = [
+    ['beforeId=10000000-0000-4000-8000-000000000001', 'beforeId needs before.'],
+    [`before=${encodeURIComponent('2026-11-20T10:00:00Z')}&beforeId=nope`, 'Invalid beforeId.'],
+    [`before=${encodeURIComponent('2026-11-20T10:00:00Z')}&beforeId=`, 'Invalid beforeId.'],
+  ];
+  for (const [path, error] of cases) {
+    const res = await handleService(call('GET', `/api/conversations/${C1}/messages?` + path), { env, fetcher });
+    assert.equal(res.status, 400, path);
+    assert.equal((await res.json()).error, error);
+  }
+  assert.equal(fetcher.find(SUPA + '/rest/v1/').length, 0);
+});
+
+test('PR D-fix-2: an older message does not replace the newer preview', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C1 });
+  const fetcher = router(db.routes);
+  const post = row => fetcher(`${SUPA}/rest/v1/dua_messages`, { method: 'POST', headers: { authorization: 'Bearer user-token' },
+    body: JSON.stringify({ conversation_id: C1, owner_id: UID, ...row }) });
+  assert.equal((await post({ role: 'user', content: 'newest' })).status, 201);
+  assert.equal(conv.last_message_preview, 'newest');
+  // Simulates an out-of-order commit: the row is older than last_message_at.
+  const at = conv.last_message_at;
+  const res = await post({ role: 'assistant', content: 'older', created_at: '2026-01-01T00:00:00+00:00' });
+  assert.equal(res.status, 201);
+  assert.equal(conv.last_message_preview, 'newest');
+  assert.equal(conv.last_message_at, at);
+});
+
+test('PR D-fix-2: preview guard migration is additive, guarded and narrows the insert grant', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const sql = await readFile(new URL('../../../supabase/migrations/202611260002_dua_messages_preview_guard.sql', import.meta.url), 'utf8');
+  const code = sql.replace(/--.*$/gm, '');
+  assert.match(code, /create or replace function public\.dua_messages_touch_conversation\(\)/);
+  assert.match(code, /security definer set search_path = ''/);
+  assert.match(code, /last_message_at = greatest\(c\.last_message_at, new\.created_at\)/);
+  assert.match(code, /when new\.created_at >= c\.last_message_at/);
+  assert.match(code, /else c\.last_message_preview/);
+  assert.match(code, /revoke all on function public\.dua_messages_touch_conversation\(\) from public, anon, authenticated;/);
+  assert.match(code, /revoke insert on public\.dua_messages from authenticated;/);
+  const grant = /grant insert \(([^)]*)\)\s+on public\.dua_messages to authenticated;/.exec(code);
+  assert.ok(grant, 'column-level insert grant');
+  assert.deepEqual(grant[1].split(',').map(c => c.trim()).sort(), ['agent_id', 'content', 'conversation_id', 'model', 'owner_id', 'role', 'token_count', 'usage']);
+  for (const forbidden of [/create\s+table/i, /alter\s+table/i, /\bdrop\s+(table|trigger|function)\b/i, /\bupdate\s+public\.dua_conversations\s+set[\s\S]*\bwhere\b[\s\S]*;\s*$/i, /\bdelete\s+from\b/i, /service_role/i]) {
+    assert.doesNotMatch(code.replace(/\$\$[\s\S]*?\$\$/g, ''), forbidden, String(forbidden));
+  }
 });

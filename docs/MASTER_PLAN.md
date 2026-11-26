@@ -108,7 +108,7 @@ shipped behaviour; this file describes the target and the order of work.
   or reply completes cleanly, it saves the assistant message with `agent_id`, `model` and nullable
   token or usage. The database trigger updates `last_message_at` and `last_message_preview`.
 - Requests without `conversation_id` and the engine path are unchanged.
-- D-fix-1: user turn saved only after all checks (no orphans), unknown `agent_id` is `400`, `model` stores the provider id, one token-count helper, a failed save returns the reply with a `notice`, and `GET /api/memories?q=`. Later (separate approval): D-fix-2 preview-trigger migration and `beforeId` cursor.
+- D-fix-1: user turn saved only after all checks (no orphans), unknown `agent_id` is `400`, `model` stores the provider id, one token-count helper, a failed save returns the reply with a `notice`, and `GET /api/memories?q=`. D-fix-2: migration `202611260002_dua_messages_preview_guard` (preview only follows a message at least as new as `last_message_at`; `authenticated` can no longer insert `dua_messages.id`/`created_at`) and the optional `beforeId` tie-breaker for `before`.
 
 ### PR E: agents and skills (completed)
 
