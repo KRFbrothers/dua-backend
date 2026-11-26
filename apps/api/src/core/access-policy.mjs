@@ -6,6 +6,7 @@ const json = (body, status, headers = new Headers()) => {
   headers.set('Content-Type', 'application/json');
   return new Response(JSON.stringify(body), { status, headers });
 };
+// Unverified decode on purpose: this only classifies an operator-configured env key, never a client token. Do not use it for auth decisions.
 function adminKey(value) {
   if (typeof value !== 'string' || value.length > 10000) return null;
   if (/^sb_secret_[A-Za-z0-9_-]+$/.test(value)) return value;
