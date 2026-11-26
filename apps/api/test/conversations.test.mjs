@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleService } from '../src/server/service-handler.mjs';
-import { searchPattern, parseMentions } from '../src/core/conversations.mjs';
+import { searchPattern, parseMentions, usageTokenCount } from '../src/core/conversations.mjs';
 import { validateChat } from '../src/core/providers.mjs';
 import { filesEnv, router, SUPA, UID, OTHER } from './files-helpers.mjs';
 import { readEvents, sseResponse, sse } from './helpers.mjs';
@@ -453,12 +453,17 @@ test('POST /api/chat with conversation_id persists user turn before stream and a
   assert.equal(assistantMsg.role, 'assistant');
   assert.equal(assistantMsg.content, 'Paris is wonderful!');
   assert.equal(assistantMsg.agent_id, 'dua-agent');
-  assert.equal(assistantMsg.model, 'Dua');
+  assert.equal(assistantMsg.model, env.GEMINI_MODEL, 'the real provider model id is stored, not the picker label');
   assert.equal(assistantMsg.token_count, 18);
   assert.deepEqual(assistantMsg.usage, { inputTokens: 12, outputTokens: 6 });
 
   // Conversation preview and last_message_at were touched by trigger emulation
   assert.equal(conv.last_message_preview, 'Paris is wonderful!');
+
+  // The user turn is written after every preflight check but before generation starts.
+  const userSave = fetcher.calls.findIndex(c => c.method === 'POST' && c.url.includes('/rest/v1/dua_messages') && c.json?.role === 'user');
+  const generation = fetcher.calls.findIndex(c => c.url.includes(':streamGenerateContent'));
+  assert.ok(userSave >= 0 && generation > userSave, 'user turn saved before generation');
 
   // Verify GET /api/conversations/:id/messages returns both in order
   const listRes = await handleService(call('GET', `/api/conversations/${conv.id}/messages`), { env, fetcher });
@@ -768,4 +773,117 @@ test('Phase 4A: Multi-Agent non-streaming chat returns replies and saves turns',
   assert.equal(db.messages[1].role, 'assistant');
   assert.equal(db.messages[2].role, 'assistant');
   assert.deepEqual([db.messages[1].agent_id, db.messages[2].agent_id].sort(), ['dua-agent', 'personal-agent']);
+  assert.equal(db.messages[1].model, env.GEMINI_MODEL);
+  assert.equal(data.notice, undefined);
+});
+
+// ─── PR D fixes: orphans, save failures, model id, agent_id, token usage ─────
+
+/** Fails POSTs of assistant rows to dua_messages; everything else goes to the in-memory database. */
+const failAssistantSaves = [(url, init) => init.method === 'POST' && url.startsWith(`${SUPA}/rest/v1/dua_messages`) && JSON.parse(init.body).role === 'assistant',
+  () => Response.json({ message: 'boom' }, { status: 500 })];
+const SAVE_NOTICE = 'This reply could not be saved to the conversation. Copy it if you need it, then retry.';
+
+test('PR D: a chat refused by a preflight check writes no orphan user message', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C1 });
+  const fetcher = router(db.routes);
+  const body = { model: 'Dua', messages: [{ role: 'user', text: 'Hello?' }], conversation_id: conv.id };
+
+  const unconfigured = await handleService(call('POST', '/api/chat', body), { env: { ...env, GEMINI_API_KEY: '' }, fetcher });
+  assert.equal(unconfigured.status, 503);
+  assert.equal(db.messages.length, 0, 'no user row when the provider is not configured');
+
+  const streamed = await handleService(call('POST', '/api/chat', { ...body, stream: true }), { env: { ...env, GEMINI_MODEL: '' }, fetcher });
+  assert.equal(streamed.status, 503);
+  assert.equal(db.messages.length, 0, 'no user row before a stream that never starts');
+});
+
+test('PR D: unknown agent_id is refused with 400; official and owner agents are accepted', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C1, agent_id: 'dua-agent' });
+  db.customAgents.push({ id: 'code-helper', owner_id: UID, name: 'Code Helper', mode: 'auto', system_prompt: '' });
+  const gemini = [url => url.includes(':generateContent'), () => Response.json({ candidates: [{ content: { parts: [{ text: 'Hi.' }] }, finishReason: 'STOP' }] })];
+  const fetcher = router([...db.routes, gemini]);
+  const body = { model: 'Dua', messages: [{ role: 'user', text: 'Hello' }], conversation_id: conv.id };
+
+  const unknown = await handleService(call('POST', '/api/chat', { ...body, agent_id: 'ghost-agent' }), { env, fetcher });
+  assert.equal(unknown.status, 400);
+  assert.equal((await unknown.json()).error, 'Unknown agent_id.');
+  assert.equal(db.messages.length, 0);
+
+  const custom = await handleService(call('POST', '/api/chat', { ...body, agentId: 'code-helper' }), { env, fetcher });
+  assert.equal(custom.status, 200);
+  assert.equal(db.messages.at(-1).agent_id, 'code-helper');
+
+  const official = await handleService(call('POST', '/api/chat', { ...body, agent_id: 'personal-agent' }), { env, fetcher });
+  assert.equal(official.status, 200);
+  assert.equal(db.messages.at(-1).agent_id, 'personal-agent');
+});
+
+test('PR D: a custom agent_id is not called unknown while dua_agents is unreadable (503, nothing written)', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C1 });
+  const fetcher = router([[url => url.startsWith(`${SUPA}/rest/v1/dua_agents`), () => new Response(null, { status: 500 })], ...db.routes]);
+  const res = await handleService(call('POST', '/api/chat', { model: 'Dua', messages: [{ role: 'user', text: 'Hello' }], conversation_id: conv.id, agent_id: 'code-helper' }), { env, fetcher });
+  assert.equal(res.status, 503);
+  assert.equal(db.messages.length, 0);
+});
+
+test('PR D: a streamed reply whose save fails still ends with notice then done', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C1 });
+  const gemini = [url => url.includes(':streamGenerateContent'), () => sseResponse([
+    sse({ candidates: [{ content: { parts: [{ text: 'Kept reply.' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 2 } }),
+  ])];
+  const fetcher = router([failAssistantSaves, ...db.routes, gemini]);
+  const response = await handleService(call('POST', '/api/chat', { model: 'Dua', messages: [{ role: 'user', text: 'Hi' }], conversation_id: conv.id, stream: true }), { env, fetcher });
+  assert.equal(response.status, 200);
+  const events = await readEvents(response);
+  assert.deepEqual(events, [
+    { type: 'text', delta: 'Kept reply.' },
+    { type: 'notice', message: SAVE_NOTICE },
+    { type: 'done', truncated: false, usage: { inputTokens: 2, outputTokens: 2 } },
+  ]);
+  assert.equal(events.some(e => e.type === 'error'), false);
+  assert.deepEqual(db.messages.map(m => m.role), ['user']);
+});
+
+test('PR D: a JSON reply whose save fails returns 200 with the text and a notice', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C1 });
+  const gemini = [url => url.includes(':generateContent'), () => Response.json({ candidates: [{ content: { parts: [{ text: 'Still here.' }] }, finishReason: 'STOP' }] })];
+  const fetcher = router([failAssistantSaves, ...db.routes, gemini]);
+  const response = await handleService(call('POST', '/api/chat', { model: 'Dua', messages: [{ role: 'user', text: 'Hi' }], conversation_id: conv.id }), { env, fetcher });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.text, 'Still here.');
+  assert.equal(body.notice, SAVE_NOTICE);
+  assert.deepEqual(db.messages.map(m => m.role), ['user']);
+});
+
+test('PR D: multi-agent JSON keeps every reply when the first agent save fails', async () => {
+  const db = database();
+  const conv = db.addConversation({ id: C2 });
+  db.addConversationAgent(conv.id, 'personal-agent');
+  db.addConversationAgent(conv.id, 'dua-agent');
+  let n = 0;
+  const gemini = [url => url.includes(':generateContent'), () => Response.json({ candidates: [{ content: { parts: [{ text: `Reply ${++n}` }] }, finishReason: 'STOP' }] })];
+  const fetcher = router([failAssistantSaves, ...db.routes, gemini]);
+  const response = await handleService(call('POST', '/api/chat', { model: 'Dua', messages: [{ role: 'user', text: 'Both of you?' }], conversation_id: conv.id }), { env, fetcher });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.replies.length, 2);
+  assert.ok(body.replies.every(reply => reply.text && reply.notice === SAVE_NOTICE));
+  assert.equal(body.notice, SAVE_NOTICE);
+});
+
+test('PR D: usageTokenCount is the single token_count rule', () => {
+  assert.equal(usageTokenCount({ totalTokens: 30, inputTokens: 1, outputTokens: 1 }), 30);
+  assert.equal(usageTokenCount({ inputTokens: 12, outputTokens: 6 }), 18);
+  assert.equal(usageTokenCount({ outputTokens: 4 }), 4);
+  assert.equal(usageTokenCount({ inputTokens: 0, outputTokens: 0 }), null);
+  assert.equal(usageTokenCount({ totalTokens: -1, inputTokens: 'x' }), null);
+  assert.equal(usageTokenCount(null), null);
+  assert.equal(usageTokenCount(undefined), null);
 });

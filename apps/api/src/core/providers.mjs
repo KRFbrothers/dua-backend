@@ -20,6 +20,26 @@ import { resolveOwner, StorageError } from './storage.mjs';
 import { resolveProjectContext, validProjectId } from './projects.mjs';
 import { prepareReplySave, savedReplyStream, validateReplySave } from './reply-persistence.mjs';
 import { prepareConversationChat, UUID, AGENT_ID } from './conversations.mjs';
+
+const SAVE_FAILED_NOTICE = 'This reply could not be saved to the conversation. Copy it if you need it, then retry.';
+
+/** PR D: writes the conversation's user turn after every preflight check; returns an error response or null. */
+async function saveConversationUserTurn(conversationChat, signal) {
+  if (!conversationChat) return null;
+  try { await conversationChat.saveUserMessage(signal); return null; }
+  catch (error) { return json({ error: error.message || 'Conversations storage is temporarily unavailable. Retry.' }, error.status || 502); }
+}
+
+/** PR D: saves an assistant turn; a failed save never drops the reply, it returns a notice instead. */
+async function commitReply(conversationChat, row, signal) {
+  try { await conversationChat.commitAssistantMessage(row, signal); return null; }
+  catch (error) {
+    console.error('[dua-chat] reply save failed', error?.status || error?.name);
+    return SAVE_FAILED_NOTICE;
+  }
+}
+
+const joinNotice = (...parts) => parts.filter(Boolean).join(' ') || null;
 import { requestOriginAllowed } from './cors.mjs';
 
 const fileTypes = ['text/plain', 'image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
@@ -280,6 +300,8 @@ async function generateValidatedChat(request, data, { env, fetcher, pageReader, 
   const reasoning = data.mode === 'reasoning';
   if (data.xSearch === true && !xSearchAvailable(env)) return json({ error: 'X search is turned off on this server. Turn X off and retry.' }, 403);
   const search = searchPlan(provider, data, env, definitions);
+  const userTurnFailed = await saveConversationUserTurn(conversationChat, request.signal);
+  if (userTurnFailed) return userTurnFailed;
   const reply = (signal, sendEvent) => generateChatReply(request, data, provider, parts, { env, fetcher, pageReader, model, reasoning, search, signal, sendEvent });
   if (data.stream === true) {
     // Flush headers and keep the socket alive BEFORE web/file preparation or provider headers arrive.
@@ -328,28 +350,8 @@ async function generateValidatedChat(request, data, { env, fetcher, pageReader, 
           }
 
           if (agentDone && !agentFailed && agentText.trim()) {
-            try {
-              const usage = agentDone.usage;
-              const tokenCount = Number.isInteger(usage?.totalTokens)
-                ? usage.totalTokens
-                : ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) || null);
-              await conversationChat.commitAssistantMessage({
-                text: agentText,
-                agentId: agent.id,
-                model: data.model,
-                tokenCount,
-                usage: (usage && typeof usage === 'object') ? usage : null,
-              }, streamSignal);
-            } catch (err) {
-              send({
-                type: 'error',
-                message: err.message || `Saving ${agent.name} reply failed.`,
-                status: err.status || 502,
-                agentId: agent.id,
-                agentName: agent.name,
-              });
-              return;
-            }
+            const saveNotice = await commitReply(conversationChat, { text: agentText, agentId: agent.id, model, usage: agentDone.usage }, streamSignal);
+            if (saveNotice) send({ type: 'notice', message: saveNotice, agentId: agent.id, agentName: agent.name });
           }
 
           send({
@@ -387,22 +389,8 @@ async function generateValidatedChat(request, data, { env, fetcher, pageReader, 
         return;
       }
       if (conversationChat && doneEvent && !streamFailed && assistantText.trim()) {
-        try {
-          const usage = doneEvent.usage;
-          const tokenCount = Number.isInteger(usage?.totalTokens)
-            ? usage.totalTokens
-            : ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) || null);
-          await conversationChat.commitAssistantMessage({
-            text: assistantText,
-            agentId: conversationChat.agentId,
-            model: data.model,
-            tokenCount,
-            usage: (usage && typeof usage === 'object') ? usage : null,
-          }, streamSignal);
-        } catch (error) {
-          send({ type: 'error', message: error.message || 'Reply was generated but saving to conversation failed. Retry.', status: error.status || 502 });
-          return;
-        }
+        const saveNotice = await commitReply(conversationChat, { text: assistantText, agentId: conversationChat.agentId, model, usage: doneEvent.usage }, streamSignal);
+        if (saveNotice) send({ type: 'notice', message: saveNotice });
       }
       if (doneEvent) {
         send(doneEvent);
@@ -415,18 +403,11 @@ async function generateValidatedChat(request, data, { env, fetcher, pageReader, 
     if (conversationChat.isMultiAgent) {
       const remainingAgents = conversationChat.targetAgents.slice(1);
       const usage = body.usage;
-      const tokenCount = Number.isInteger(usage?.totalTokens)
-        ? usage.totalTokens
-        : ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) || null);
-      await conversationChat.commitAssistantMessage({
-        text: body.text,
-        agentId: conversationChat.targetAgents[0].id,
-        model: data.model,
-        tokenCount,
-        usage: (usage && typeof usage === 'object') ? usage : null,
-      }, request.signal);
+      const first = conversationChat.targetAgents[0];
+      const firstNotice = await commitReply(conversationChat, { text: body.text, agentId: first.id, model, usage }, request.signal);
 
-      const replies = [{ agentId: conversationChat.targetAgents[0].id, agentName: conversationChat.targetAgents[0].name, text: body.text, usage }];
+      const replies = [{ agentId: first.id, agentName: first.name, text: body.text, usage, ...(firstNotice ? { notice: firstNotice } : {}) }];
+      let saveFailed = Boolean(firstNotice);
 
       await Promise.allSettled(remainingAgents.map(async agent => {
         const agentData = {
@@ -438,36 +419,18 @@ async function generateValidatedChat(request, data, { env, fetcher, pageReader, 
         const extraBody = await extraRes.json().catch(() => null);
         if (!extraBody?.text) return;
         const u = extraBody.usage;
-        const tc = Number.isInteger(u?.totalTokens) ? u.totalTokens : ((u?.inputTokens ?? 0) + (u?.outputTokens ?? 0) || null);
-        await conversationChat.commitAssistantMessage({
-          text: extraBody.text,
-          agentId: agent.id,
-          model: data.model,
-          tokenCount: tc,
-          usage: (u && typeof u === 'object') ? u : null,
-        }, request.signal);
-        replies.push({ agentId: agent.id, agentName: agent.name, text: extraBody.text, usage: u });
+        const extraNotice = await commitReply(conversationChat, { text: extraBody.text, agentId: agent.id, model, usage: u }, request.signal);
+        if (extraNotice) saveFailed = true;
+        replies.push({ agentId: agent.id, agentName: agent.name, text: extraBody.text, usage: u, ...(extraNotice ? { notice: extraNotice } : {}) });
       }));
 
-      return json({ ...body, replies }, res.status, Object.fromEntries(res.headers.entries()));
+      const groupNotice = joinNotice(body.notice, saveFailed ? SAVE_FAILED_NOTICE : null);
+      return json({ ...body, ...(groupNotice ? { notice: groupNotice } : {}), replies }, res.status, Object.fromEntries(res.headers.entries()));
     }
 
-    try {
-      const usage = body.usage;
-      const tokenCount = Number.isInteger(usage?.totalTokens)
-        ? usage.totalTokens
-        : ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) || null);
-      await conversationChat.commitAssistantMessage({
-        text: body.text,
-        agentId: conversationChat.agentId,
-        model: data.model,
-        tokenCount,
-        usage: (usage && typeof usage === 'object') ? usage : null,
-      }, request.signal);
-      return json(body, res.status, Object.fromEntries(res.headers.entries()));
-    } catch (error) {
-      return json({ error: error.message || 'Reply was generated but saving to conversation failed. Retry.' }, error.status || 502);
-    }
+    const saveNotice = await commitReply(conversationChat, { text: body.text, agentId: conversationChat.agentId, model, usage: body.usage }, request.signal);
+    const replyNotice = joinNotice(body.notice, saveNotice);
+    return json({ ...body, ...(replyNotice ? { notice: replyNotice } : {}) }, res.status, Object.fromEntries(res.headers.entries()));
   }
   return res;
 }
@@ -593,6 +556,8 @@ async function handleBuildChat(request, data, provider, { env, fetcher, startedA
     if (error instanceof GitHubError) return json({ error: error.message }, [400, 404, 429].includes(error.status) ? error.status : 502);
     return json({ error: 'GitHub connector request failed. Check your connection and GitHub service availability, then retry this read.' }, 502);
   }
+  const userTurnFailed = await saveConversationUserTurn(conversationChat, signal);
+  if (userTurnFailed) return userTurnFailed;
   const { keepFrom } = planContext(data.messages, contextBudget(provider.prefix, env), { lowWater: false });
   const messages = data.messages.slice(keepFrom);
   const notice = [keepFrom > 0 ? 'The oldest messages were left out to fit Build mode.' : null,
@@ -634,43 +599,18 @@ async function handleBuildChat(request, data, provider, { env, fetcher, startedA
         activeSend({ type: 'error', message: body.error || 'Build mode failed. Retry.', status: failed.status });
       }
       if (conversationChat && doneEvent && !streamFailed && assistantText.trim()) {
-        try {
-          const usage = doneEvent.usage;
-          const tokenCount = Number.isInteger(usage?.totalTokens)
-            ? usage.totalTokens
-            : ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) || null);
-          await conversationChat.commitAssistantMessage({
-            text: assistantText,
-            model: data.model,
-            tokenCount,
-            usage: (usage && typeof usage === 'object') ? usage : null,
-          }, streamSignal);
-        } catch (error) {
-          send({ type: 'error', message: error.message || 'Reply was generated but saving to conversation failed. Retry.', status: error.status || 502 });
-          return;
-        }
+        const saveNotice = await commitReply(conversationChat, { text: assistantText, model, usage: doneEvent.usage }, streamSignal);
+        if (saveNotice) send({ type: 'notice', message: saveNotice });
       }
       if (doneEvent) send(doneEvent);
     }, { signal, onUnexpected: error => console.error('[dua-build] stream failed', error?.name) });
   }
   try {
     const result = await run(signal);
-    if (conversationChat) {
-      try {
-        const usage = result.usage;
-        const tokenCount = Number.isInteger(usage?.totalTokens)
-          ? usage.totalTokens
-          : ((usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) || null);
-        await conversationChat.commitAssistantMessage({
-          text: result.text.slice(0, MAX_REPLY_CHARS),
-          model: data.model,
-          tokenCount,
-          usage: (usage && typeof usage === 'object') ? usage : null,
-        }, signal);
-      } catch (error) {
-        return json({ error: error.message || 'Reply was generated but saving to conversation failed. Retry.' }, error.status || 502);
-      }
-    }
-    return json({ text: result.text.slice(0, MAX_REPLY_CHARS), build: result.build, ...(result.proposal ? { proposal: result.proposal } : {}), ...(result.truncated ? { truncated: true } : {}), ...(notice ? { notice } : {}) });
+    const saveNotice = conversationChat
+      ? await commitReply(conversationChat, { text: result.text.slice(0, MAX_REPLY_CHARS), model, usage: result.usage }, signal)
+      : null;
+    const replyNotice = joinNotice(notice, saveNotice);
+    return json({ text: result.text.slice(0, MAX_REPLY_CHARS), build: result.build, ...(result.proposal ? { proposal: result.proposal } : {}), ...(result.truncated ? { truncated: true } : {}), ...(replyNotice ? { notice: replyNotice } : {}) });
   } catch (error) { return failure(error, signal); }
 }

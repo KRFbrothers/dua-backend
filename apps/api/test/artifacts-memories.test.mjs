@@ -289,6 +289,39 @@ test('Phase 3: privacy boundary — group:<CONV_B> memory never leaks into CONV_
   assert.equal(list.some(m => m.id === 'mem_b_secret'), false, 'Thread B memory must not appear in Thread A query');
 });
 
+test('PR D: GET /api/memories?q= searches title or summary literally, quoted for PostgREST or=()', async () => {
+  const urls = [];
+  const fetcher = router([[url => url.startsWith(`${SUPA}/rest/v1/dua_memories`), url => { urls.push(new URL(url)); return Response.json([]); }]]);
+  const cases = [
+    ['brand green', '(title.ilike."*brand green*",summary.ilike."*brand green*")'],
+    ['50%_off', '(title.ilike."*50\\\\%\\\\_off*",summary.ilike."*50\\\\%\\\\_off*")'],
+    ['a\\b', '(title.ilike."*a\\\\\\\\b*",summary.ilike."*a\\\\\\\\b*")'],
+    ['say "hi", (now)*', '(title.ilike."*say \\"hi\\", (now)*",summary.ilike."*say \\"hi\\", (now)*")'],
+  ];
+  for (const [q, expected] of cases) {
+    const res = await handleService(call('GET', `/api/memories?q=${encodeURIComponent(q)}`), { env, fetcher });
+    assert.equal(res.status, 200, q);
+    assert.equal(urls.at(-1).searchParams.get('or'), expected, q);
+  }
+  // q combines with the privacy filter; blank or wildcard-only q adds no filter.
+  await handleService(call('GET', `/api/memories?conversation_id=${CONV_A}&q=trip`), { env, fetcher });
+  assert.equal(urls.at(-1).searchParams.get('scope'), `in.(global,group:${CONV_A})`);
+  assert.equal(urls.at(-1).searchParams.get('or'), '(title.ilike."*trip*",summary.ilike."*trip*")');
+  for (const q of ['', '   ', '***']) {
+    await handleService(call('GET', `/api/memories?q=${encodeURIComponent(q)}`), { env, fetcher });
+    assert.equal(urls.at(-1).searchParams.has('or'), false, JSON.stringify(q));
+  }
+});
+
+test('PR D: an over-long memory q is refused with 400 before any database call', async () => {
+  let calls = 0;
+  const fetcher = router([[url => url.startsWith(`${SUPA}/rest/v1/dua_memories`), () => { calls++; return Response.json([]); }]]);
+  const res = await handleService(call('GET', `/api/memories?q=${'x'.repeat(101)}`), { env, fetcher });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, 'Invalid q.');
+  assert.equal(calls, 0);
+});
+
 // ─── Phase 4B: Collaborative Studios (Artifact Versions & Revise) ──────────────
 
 function geminiRevision() {

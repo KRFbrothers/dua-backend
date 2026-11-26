@@ -349,13 +349,15 @@ export function parseMentions(text, candidates = []) {
 
 /**
  * Phase 4A: Loads all agents available to this owner (official + custom from dua_agents).
+ * When the custom list cannot be read, the official list is returned with `customUnavailable` set.
  */
 export async function loadAvailableAgents({ base, headers, ownerId, fetcher = fetch, signal = null }) {
   const official = [
     { id: 'personal-agent', name: 'Personal Agent', mode: 'auto', systemPrompt: '' },
     { id: 'dua-agent', name: 'Dua Agent', mode: 'agent', systemPrompt: '' },
   ];
-  if (!base || !headers || !ownerId) return official;
+  const officialOnly = () => Object.defineProperty([...official], 'customUnavailable', { value: true });
+  if (!base || !headers || !ownerId) return officialOnly();
 
   try {
     const res = await fetcher(`${base}/rest/v1/dua_agents?select=id,name,mode,system_prompt&owner_id=eq.${encodeURIComponent(ownerId)}`, {
@@ -364,9 +366,9 @@ export async function loadAvailableAgents({ base, headers, ownerId, fetcher = fe
       redirect: 'error',
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000),
     });
-    if (!res.ok) return official;
-    const rows = await res.json().catch(() => []);
-    if (!Array.isArray(rows)) return official;
+    if (!res.ok) return officialOnly();
+    const rows = await res.json().catch(() => null);
+    if (!Array.isArray(rows)) return officialOnly();
     const custom = rows.map(r => ({
       id: r.id,
       name: r.name,
@@ -381,14 +383,24 @@ export async function loadAvailableAgents({ base, headers, ownerId, fetcher = fe
     }
     return merged;
   } catch {
-    return official;
+    return officialOnly();
   }
+}
+
+/** One token count for dua_messages.token_count: totalTokens, else input + output, else null. */
+export function usageTokenCount(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  if (Number.isInteger(usage.totalTokens) && usage.totalTokens >= 0) return usage.totalTokens;
+  const input = Number.isInteger(usage.inputTokens) && usage.inputTokens >= 0 ? usage.inputTokens : 0;
+  const output = Number.isInteger(usage.outputTokens) && usage.outputTokens >= 0 ? usage.outputTokens : 0;
+  return input + output || null;
 }
 
 /**
  * PR D + PR G: Chat persistence and multi-agent group chat orchestration for relational conversations.
- * Verifies the owner session and conversation ownership, then writes the user's turn to dua_messages
- * before the stream starts. Resolves target agents (@mention or group members) and returns a commit helper.
+ * Verifies the owner session, conversation ownership and agent_id, and resolves target agents
+ * (@mention or group members). Nothing is written here: the caller runs its remaining checks, then
+ * calls saveUserMessage() just before generation, and commitAssistantMessage() after the reply.
  */
 export async function prepareConversationChat(request, data, { env = process.env, fetcher = fetch } = {}) {
   const conversationId = (data.conversation_id || data.conversationId)?.toLowerCase();
@@ -432,7 +444,8 @@ export async function prepareConversationChat(request, data, { env = process.env
     throw Object.assign(new Error('That conversation was not found.'), { status: 404 });
   }
   const conv = convRows[0];
-  const primaryFallbackAgentId = data.agent_id || data.agentId || conv.agent_id || 'personal-agent';
+  const requestedAgentId = data.agent_id || data.agentId || null;
+  const primaryFallbackAgentId = requestedAgentId || conv.agent_id || 'dua-agent';
 
   // Phase 3: inject privacy-safe memories into data.memory for context.
   // Loads 'global' + 'group:<conversationId>' memories; never leaks other threads.
@@ -467,6 +480,13 @@ export async function prepareConversationChat(request, data, { env = process.env
   } catch {}
 
   const availableAgents = await loadAvailableAgents({ base, headers, ownerId: owner.user.id, fetcher, signal: request.signal });
+  if (requestedAgentId && !availableAgents.some(agent => agent.id === requestedAgentId)) {
+    // A custom agent cannot be confirmed while dua_agents is unreadable: retryable, not the caller's fault.
+    if (availableAgents.customUnavailable) {
+      throw Object.assign(new Error(`${FEATURE} are temporarily unavailable. Retry.`), { status: 503 });
+    }
+    throw Object.assign(new Error('Unknown agent_id.'), { status: 400 });
+  }
 
   // Parse @mentions
   const mentionedAgents = parseMentions(userContent, availableAgents);
@@ -497,22 +517,29 @@ export async function prepareConversationChat(request, data, { env = process.env
     role: 'user',
     content: userContent,
   };
-  const saveUserRes = await fetcher(`${base}/rest/v1/dua_messages`, {
-    method: 'POST',
-    headers: {
-      ...headers,
-      'Content-Type': 'application/json',
-      Prefer: 'return=representation',
-    },
-    body: JSON.stringify(userRow),
-    redirect: 'error',
-    signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]),
-  });
-  if (!saveUserRes.ok) {
-    const failure = upstreamFailure(saveUserRes.status);
-    const body = await failure.json().catch(() => ({}));
-    throw Object.assign(new Error(body.error || `${FEATURE} are temporarily unavailable. Retry.`), { status: failure.status });
-  }
+  let userSaved = null;
+  // Writes the user's turn once; later calls reuse the same result.
+  const saveUserMessage = signal => {
+    userSaved ??= (async () => {
+      const saveUserRes = await fetcher(`${base}/rest/v1/dua_messages`, {
+        method: 'POST',
+        headers: {
+          ...headers,
+          'Content-Type': 'application/json',
+          Prefer: 'return=representation',
+        },
+        body: JSON.stringify(userRow),
+        redirect: 'error',
+        signal: AbortSignal.any([signal || request.signal, AbortSignal.timeout(15000)]),
+      });
+      if (!saveUserRes.ok) {
+        const failure = upstreamFailure(saveUserRes.status);
+        const body = await failure.json().catch(() => ({}));
+        throw Object.assign(new Error(body.error || `${FEATURE} are temporarily unavailable. Retry.`), { status: failure.status });
+      }
+    })();
+    return userSaved;
+  };
 
   return {
     owner,
@@ -520,8 +547,11 @@ export async function prepareConversationChat(request, data, { env = process.env
     agentId,
     targetAgents,
     isMultiAgent,
-    async commitAssistantMessage({ text, model, tokenCount = null, usage = null, agentId: messageAgentId = null }, signal) {
+    saveUserMessage,
+    async commitAssistantMessage({ text, model, usage = null, agentId: messageAgentId = null }, signal) {
+      await saveUserMessage(signal);
       const rowAgentId = messageAgentId || agentId;
+      const tokenCount = usageTokenCount(usage);
       const assistantRow = {
         conversation_id: conversationId,
         owner_id: owner.user.id,
@@ -529,7 +559,7 @@ export async function prepareConversationChat(request, data, { env = process.env
         role: 'assistant',
         content: text,
         model: model ? String(model).slice(0, 120) : null,
-        token_count: Number.isInteger(tokenCount) && tokenCount >= 0 ? tokenCount : null,
+        token_count: tokenCount,
         usage: usage && typeof usage === 'object' ? usage : null,
       };
       const saveRes = await fetcher(`${base}/rest/v1/dua_messages`, {
