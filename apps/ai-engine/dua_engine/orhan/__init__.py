@@ -1,1 +1,1 @@
-"""Orhan's task coordinator. Dua chat does not use this package."""
+"""Dua Work task coordinator (legacy Orhan package name). Dua chat does not use this package."""

@@ -404,9 +404,9 @@ Clients subscribe using standard Supabase client channels: `supabase.channel('pu
 
 Push notifications are dispatched via **FCM HTTP v1** (`https://fcm.googleapis.com/v1/projects/${FCM_PROJECT_ID}/messages:send`) using Google OAuth2 credentials. The legacy FCM endpoint (`fcm.googleapis.com/fcm/send`) is strictly prohibited and never used.
 
-### Orhan tasks
+### Dua Work tasks (legacy Orhan routes)
 
-One running task. Research, then Checker, then Writer. Max 12 steps and 10 minutes.
+Dua Work tasks keep the legacy `/api/orhan/*` route names and the `dua_orhan_tasks` table for Android compatibility. One running task. Research, then Checker, then Writer. Max 12 steps and 10 minutes.
 
 | Path | Request | Response |
 |---|---|---|
@@ -584,7 +584,7 @@ The chosen model is recorded in `dua_messages.model`, and `AGENT_DAILY_TOKEN_LIM
 | `GET /api/agent/workspaces` | none | `{ "checkpoints": [{ "id": "", "revision": 0, "base_sha": "", "updated": 0, "expires": 0 }] }` |
 | `POST /api/imagine/image` | same image body as the Node route | same stored-image JSON the Node route returns |
 
-### Orhan engine routes
+### Dua Work engine routes (legacy Orhan routes)
 
 The Node task API calls these. A UI can also call them with the owner bearer token.
 

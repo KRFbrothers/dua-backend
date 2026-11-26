@@ -1,4 +1,4 @@
-"""Three fixed Orhan agents. A new agent is a job description plus tools, not a new model.
+"""Three fixed Dua Work task agents (legacy Orhan). A new agent is a job description plus tools, not a new model.
 
 Research may search. Checker only reads that research. Writer only writes a document
 after Checker accepts it. None of them can email, pay, delete, or save memory.

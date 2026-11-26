@@ -1,4 +1,4 @@
-"""Owner-only Orhan plan and single-step routes. The Node API stores the task."""
+"""Owner-only Dua Work plan and single-step routes (legacy /api/orhan/* paths). The Node API stores the task."""
 
 import os
 

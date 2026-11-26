@@ -66,6 +66,8 @@ Use these names consistently:
 - `Dua` — chat and control-plane experience
 - `Dua Work` — execution and coding experience
 
+`Orhan` is the legacy internal name kept in routes, tables and files for compatibility (for example `/api/orhan/*` and `dua_orhan_tasks`); do not use it in new user-facing text.
+
 Do not introduce mixed or obsolete product names in new code or documentation.
 
 ## Initial Control-Plane Actions
