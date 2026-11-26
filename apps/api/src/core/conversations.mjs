@@ -201,12 +201,19 @@ export async function handleConversations(request, { env = process.env, fetcher 
       if (limit === null) return noStore('Invalid limit.', 400);
       const before = params.get('before');
       if (before !== null && (!ISO_TIME.test(before) || Number.isNaN(Date.parse(before)))) return noStore('Invalid before.', 400);
+      // Optional tie-breaker: the id of the message whose createdAt is `before` (same-timestamp rows).
+      const beforeId = params.get('beforeId');
+      if (beforeId !== null && before === null) return noStore('beforeId needs before.', 400);
+      if (beforeId !== null && !UUID.test(beforeId)) return noStore('Invalid beforeId.', 400);
       const found = await db('dua_conversations', `?select=id&${conversationFilter}&limit=1`, { method: 'GET' });
       if (!found.ok) return upstreamFailure(found.status);
       const conversation = await rowsOf(found);
       if (!conversation) return noStore(`${FEATURE} returned an invalid list.`, 502);
       if (!conversation.length) return noStore('That conversation was not found.', 404);
-      const cursor = before === null ? '' : `&created_at=lt.${encodeURIComponent(before)}`;
+      const cursor = before === null ? ''
+        : beforeId === null ? `&created_at=lt.${encodeURIComponent(before)}`
+        // Matches order=created_at.desc,id.desc: older rows, or same-time rows with a smaller id.
+        : `&or=${encodeURIComponent(`(created_at.lt."${before}",and(created_at.eq."${before}",id.lt.${beforeId.toLowerCase()}))`)}`;
       const response = await db('dua_messages',
         `?select=${MESSAGE_COLUMNS}&conversation_id=eq.${encodeURIComponent(id.toLowerCase())}&${ownerFilter}${cursor}&order=created_at.desc,id.desc&limit=${limit + 1}`,
         { method: 'GET' });
