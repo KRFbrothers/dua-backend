@@ -564,11 +564,12 @@ Local process: `python app.py` from `apps/ai-engine`, behind `wsgi.py` in produc
 
 ### Semantic Cost Router (Phase 6A)
 
-Before model execution, the engine classifies request complexity via `classify_complexity` and routes to the appropriate model tier:
-- **Fast / Low-Cost Tier (`Gemini Flash`)**: Title generation, `@mention` routing, short casual Q&A, and memory fact extraction.
-- **Frontier Reasoning Tier (`Gemini Pro` / `Claude`)**: Multi-step `mode: "agent"` tool loops, coding/PR tasks, Studio artifact revisions (`/revise`), and complex analysis.
+The engine router is server-side only and does not change any request or response shape.
 
-The chosen model is recorded in `dua_messages.model`, and `AGENT_DAILY_TOKEN_LIMIT` is strictly enforced.
+- **Plain chat model (`CHAT_MODEL_ROUTER`, default `0` = off).** With `CHAT_MODEL_ROUTER=1`, plain (non-agent) engine chat runs `classify_complexity` on the request `mode` and the last user message. Complex requests (`mode: "reasoning"`, coding/debug/PR or deep-analysis keywords, or more than 400 words) use `AGENT_MODEL`, with one fallback to `VERTEX_MODEL` if that model is missing or not permitted. Everything else stays on `VERTEX_MODEL`. Client fields never choose the tier (a `task` field is ignored). With the flag off, every plain chat uses `VERTEX_MODEL`. Agent mode keeps `AGENT_MODEL`, and OpenRouter free models are unchanged. The tier is written to the server log only.
+- **Intent (Agent mode).** `route_agent` decides `chat` (direct reply, no tools), `agent` (research and tool loop) or `code` (coding agent) for each Agent request: greetings and clear task, note or coding words first, then one low-cost model call, with a word-count fallback.
+- Not routed by the engine: Claude or other providers (unless configured through `ADK_MODELS_JSON`), and Node work such as titles, memory extraction, `@mention` group replies and `/revise`. The engine path does not write `dua_messages`. `AGENT_DAILY_TOKEN_LIMIT` (when set) still applies to Agent runs only.
+- `classify_complexity` keyword lists overlap the thinking-level router (`pick_thinking_level`); both are kept as they are.
 
 ### Agent actions, notes, documents
 

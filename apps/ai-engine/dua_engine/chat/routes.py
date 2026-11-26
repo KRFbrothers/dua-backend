@@ -122,14 +122,16 @@ def register_chat_routes(app):
             if tools:
                 chat_config["tools"] = tools
         include_code = not agent and not use_free and bool(data.get("code")) and engine.CHAT_CODE_EXECUTION == "1"
+        # Plain chat only: Agent (route_agent + tool loop) and OpenRouter free models keep their own models.
+        chat_model = None if agent or use_free else engine.get_chat_model(system, data)
         if data.get("stream") is not True:
             try:
                 try:
-                    response = engine.get_model(system).generate_content(contents, **chat_config)
+                    response = chat_model.generate_content(contents, **chat_config)
                 except Exception as error:
                     if not engine.wait_for_chat_retry(error):
                         raise
-                    response = engine.get_model(system).generate_content(contents, **chat_config)
+                    response = chat_model.generate_content(contents, **chat_config)
                 text = engine.chat_chunk_text(response, include_code)
                 sources = engine.grounding_sources(response)
             except Exception:
@@ -197,7 +199,7 @@ def register_chat_routes(app):
                     while True:
                         received = False
                         try:
-                            iterator = iter(engine.get_model(system).generate_content(contents, stream=True, **chat_config))
+                            iterator = iter(chat_model.generate_content(contents, stream=True, **chat_config))
                             for chunk in iterator:
                                 received = True
                                 if not enqueue("chunk", chunk):
