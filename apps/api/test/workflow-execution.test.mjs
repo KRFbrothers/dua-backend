@@ -4,7 +4,7 @@ import { handleWorkflowExecution, normalizeDefinition } from '../src/core/workfl
 import { readAgentOutput, runWorkerOnce } from '../src/core/workflow-worker.mjs';
 import { filesEnv, router, SUPA, UID } from './files-helpers.mjs';
 
-const env = { ...filesEnv, DUA_WORKFLOWS_ENABLED: '1', SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_test' };
+const env = { ...filesEnv, DUA_WORKFLOWS_ENABLED: '1' };
 const sample = () => ({ workflowId: 'flow', title: 'Review', requestKey: 'delivery-1', steps: [
   { id: 'research', agentName: 'Researcher', instructions: '', prompt: 'Research synthetic topic', allowedTools: ['google_search'] },
   { id: 'review', agentName: 'Reviewer', instructions: 'Check the predecessor output.', prompt: 'Review findings', allowedTools: [] },
@@ -19,7 +19,8 @@ test('execution derives owner; client lifecycle and owner fields cannot manufact
     assert.equal(call.json.p_owner, UID);
     assert.equal(call.json.p_definition.status, undefined);
     assert.equal(call.json.p_definition.steps[0].status, undefined);
-    assert.equal(call.headers.get('authorization'), 'Bearer sb_secret_test');
+    assert.equal(call.headers.get('authorization'), 'Bearer user-token');
+    assert.equal(call.headers.get('apikey'), 'sb_publishable_test');
     return Response.json(row);
   }]]);
   const data = { ...sample(), owner: 'other', status: 'succeeded' };
@@ -50,6 +51,8 @@ test('retry forwards expected attempt to make redelivery idempotent', async () =
   const fetcher = router([[SUPA + '/rest/v1/rpc/dua_workflow_control', (_url, _init, call) => {
     assert.equal(call.json.p_expected_attempt, 3);
     assert.equal(call.json.p_owner, UID);
+    assert.equal(call.headers.get('authorization'), 'Bearer user-token');
+    assert.equal(call.headers.get('apikey'), 'sb_publishable_test');
     return Response.json({ ...row, attempt: 4 });
   }]]);
   const response = await handleWorkflowExecution(request({ expectedAttempt: 3 }, `/${row.id}/retry`), { env, fetcher });
@@ -91,8 +94,13 @@ test('worker dispatches real engine requests and saves predecessor output before
   let run = { ...row, owner_id: UID, definition: normalizeDefinition(sample()), steps: sample().steps.map(s => ({ id: s.id, agentName: s.agentName, status: 'queued', output: '' })) };
   const dispatched = [];
   const fetcher = router([
-    [SUPA + '/rest/v1/rpc/dua_workflow_claim', () => Response.json([run])],
+    [SUPA + '/rest/v1/rpc/dua_workflow_claim', (_url, _init, call) => {
+      assert.equal(call.headers.get('authorization'), 'Bearer user-token');
+      assert.equal(call.headers.get('apikey'), 'sb_publishable_test');
+      return Response.json([run]);
+    }],
     [SUPA + '/rest/v1/rpc/dua_workflow_checkpoint', (_url, _init, call) => {
+      assert.equal(call.headers.get('authorization'), 'Bearer user-token');
       run = { ...run, status: call.json.p_status, steps: call.json.p_steps ?? run.steps };
       return Response.json(run);
     }],
@@ -126,4 +134,25 @@ test('worker respects acknowledged cancellation before dispatching any provider 
   const getOwner = async () => ({ user: { id: UID }, token: 'user-token', request: request(sample()) });
   await runWorkerOnce({ env, fetcher, getOwner });
   assert.equal(fetcher.calls.some(c => c.url.includes('engine.test')), false);
+});
+
+test('history and get-one use the owner access token and the anon key', async () => {
+  const fetcher = router([
+    [SUPA + '/rest/v1/rpc/dua_workflow_history', (_url, _init, call) => {
+      assert.equal(call.json.p_owner, UID);
+      assert.equal(call.headers.get('authorization'), 'Bearer user-token');
+      assert.equal(call.headers.get('apikey'), 'sb_publishable_test');
+      return Response.json([{ ...row, steps: [] }]);
+    }],
+    [SUPA + '/rest/v1/dua_workflow_executions?', (_url, _init, call) => {
+      assert.equal(call.headers.get('authorization'), 'Bearer user-token');
+      assert.equal(call.method, 'GET');
+      return Response.json([row]);
+    }],
+  ]);
+  const list = await handleWorkflowExecution(new Request('https://dua.test/api/workflow-executions', { headers: { authorization: 'Bearer user-token' } }), { env, fetcher });
+  assert.equal(list.status, 200);
+  assert.equal((await list.json()).runs[0].id, row.id);
+  const one = await handleWorkflowExecution(new Request('https://dua.test/api/workflow-executions/' + row.id, { headers: { authorization: 'Bearer user-token' } }), { env, fetcher });
+  assert.equal(one.status, 200);
 });

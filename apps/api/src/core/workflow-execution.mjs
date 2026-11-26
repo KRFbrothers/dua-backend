@@ -10,26 +10,27 @@ export const WORKFLOW_TOOLS = new Set(['google_search', 'fetch_url', 'list_files
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const reply = (body, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 const str = (v, max) => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
+const ownerToken = token => typeof token === 'string' && /^[A-Za-z0-9._-]{1,10000}$/.test(token);
 export class WorkflowError extends Error {
   constructor(message, status = 503) { super(message); this.status = status; }
 }
 
 export function executionConfig(env) {
   const base = String(env.SUPABASE_URL || '').replace(/\/$/, '');
-  const key = String(env.SUPABASE_SERVICE_ROLE_KEY || '');
-  let admin = /^sb_secret_[A-Za-z0-9_-]+$/.test(key);
-  try { admin ||= JSON.parse(Buffer.from(key.split('.')[1], 'base64url')).role === 'service_role'; } catch {}
-  let url;
+  const key = String(env.SUPABASE_ANON_KEY || '');
+  let url, serviceJwt = false;
   try { url = new URL(base); } catch {}
-  if (!url || url.protocol !== 'https:' || url.pathname !== '/' || url.username || url.password || url.search || url.hash || !admin)
+  try { serviceJwt = JSON.parse(Buffer.from(key.split('.')[1] || '', 'base64url').toString()).role === 'service_role'; } catch {}
+  if (!url || url.protocol !== 'https:' || url.pathname !== '/' || url.username || url.password || url.search || url.hash || !key || key.startsWith('sb_secret_') || serviceJwt)
     throw new WorkflowError('Workflow execution storage is not configured.');
   return { base, key };
 }
 
-export async function executionDb(path, { env, fetcher = fetch, method = 'POST', body, signal, single = false } = {}) {
+export async function executionDb(path, { env, fetcher = fetch, method = 'POST', body, signal, single = false, token } = {}) {
   const { base, key } = executionConfig(env);
+  if (!ownerToken(token)) throw new WorkflowError('Workflow execution storage is not configured.');
   const response = await fetcher(`${base}/rest/v1/${path}`, {
-    method, redirect: 'error', headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', Accept: single ? 'application/vnd.pgrst.object+json' : 'application/json' },
+    method, redirect: 'error', headers: { apikey: key, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: single ? 'application/vnd.pgrst.object+json' : 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     signal: AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(15000)]),
   });
@@ -43,6 +44,7 @@ export async function executionDb(path, { env, fetcher = fetch, method = 'POST',
     if (reason.includes('automation_revision_conflict') || reason.includes('automation_kind_conflict')) throw new WorkflowError('Automation was changed by another request. Refresh its revision before editing.', 409);
     if (reason.includes('automation_disabled')) throw new WorkflowError('This workflow trigger is disabled.', 409);
     if (reason.includes('lease_lost')) throw new WorkflowError('Worker lease lost. Execution stopped.', 409);
+    if (response.status === 401 || response.status === 403) throw new WorkflowError('Session expired or workflow access was refused. Sign in again.', response.status);
     throw new WorkflowError('Workflow storage is unavailable. Check the workflow migrations and server configuration.');
   }
   return data;
@@ -83,7 +85,7 @@ export async function handleWorkflowExecution(request, { env = process.env, fetc
     const url = new URL(request.url);
     if (!browserOriginAllowed(request, url, env)) return reply({ error: 'Request origin is not allowed.' }, 403);
     const owner = await resolveOwner(request, { env, fetcher, feature: 'workflow execution' });
-    const opts = { env, fetcher, signal: request.signal };
+    const opts = { env, fetcher, signal: request.signal, token: owner.token };
     const suffix = url.pathname.slice('/api/workflow-executions'.length);
     if (request.method === 'GET' && suffix === '') {
       const filter = url.searchParams.get('workflowId');

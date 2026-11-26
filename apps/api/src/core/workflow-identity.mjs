@@ -1,8 +1,13 @@
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { executionConfig, executionDb, WorkflowError } from './workflow-execution.mjs';
+import { executionConfig, WorkflowError } from './workflow-execution.mjs';
 import { resolveOwner, storageConfig } from './storage.mjs';
 import { readJsonLimited } from './limited-json.mjs';
+
+const METADATA_TOKEN = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token';
+const METADATA_PROJECT = 'http://metadata.google.internal/computeMetadata/v1/project/project-id';
+const SM_ROOT = 'https://secretmanager.googleapis.com/v1';
+const REVOKED = '{"state":"reauthorize"}';
 
 export function identityConfig(env) {
   executionConfig(env);
@@ -11,9 +16,18 @@ export function identityConfig(env) {
   if (env.DUA_WORKFLOW_OWNER_TOKEN_FILE) throw new WorkflowError('Legacy access-token files are unsupported. Provision a refreshable dedicated worker session.');
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(owner) || key.length !== 32 || !env.DUA_ALLOWED_EMAIL || !authConfig(env).enabled)
     throw new WorkflowError('Worker identity requires its owner ID, public Auth configuration and a 32-byte credential encryption key.');
+  sessionSecretConfig(env);
   return { owner, key };
 }
 const authConfig = env => storageConfig({ ...env, DUA_FILES: '1', DUA_FILES_BUCKET: 'dua-files' });
+
+export function sessionSecretConfig(env) {
+  const project = String(env.GOOGLE_CLOUD_PROJECT || env.PROJECT_ID || env.GCLOUD_PROJECT || '').trim();
+  const secret = String(env.DUA_WORKFLOW_OWNER_SESSION_SECRET || 'DUA_WORKFLOW_OWNER_SESSION').trim();
+  if (project && !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(project)) throw new WorkflowError('Worker session secret project is invalid.');
+  if (!/^[A-Za-z0-9_-]{1,255}$/.test(secret)) throw new WorkflowError('Worker session secret name is invalid.');
+  return { project, secret };
+}
 
 export function sealSession(session, env) {
   const { owner, key } = identityConfig(env), iv = randomBytes(12);
@@ -61,59 +75,90 @@ async function refreshSession(refreshToken, env, fetcher, signal) {
   return normalizeSession(data);
 }
 
-export function createWorkflowIdentity({ env = process.env, fetcher = fetch } = {}) {
-  const { owner } = identityConfig(env);
-  const rpc = (action, holder = null, revision = null, ciphertext = null) => executionDb('rpc/dua_workflow_identity', {
-    env, fetcher, body: { p_owner: owner, p_action: action, p_holder: holder, p_revision: revision, p_ciphertext: ciphertext },
+async function smCall(env, fetcher, signal, path, { method = 'GET', body } = {}) {
+  const { project, secret } = sessionSecretConfig(env);
+  const resolved = project || await metadataText(fetcher, signal, METADATA_PROJECT);
+  if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(resolved)) throw new WorkflowError('Worker session secret project is invalid.');
+  const access = await metadataJson(fetcher, signal, METADATA_TOKEN);
+  if (typeof access?.access_token !== 'string' || !access.access_token) throw new WorkflowError('Worker could not obtain a Secret Manager access token.');
+  const response = await fetcher(`${SM_ROOT}/projects/${resolved}/secrets/${secret}${path}`, {
+    method, redirect: 'error',
+    headers: { Authorization: `Bearer ${access.access_token}`, 'Content-Type': 'application/json' },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(15000)]),
   });
+  const data = await readJsonLimited(response, 65536).catch(() => null);
+  return { ok: response.ok, status: response.status, data };
+}
+
+async function metadataJson(fetcher, signal, url) {
+  const response = await fetcher(url, {
+    redirect: 'error', headers: { 'Metadata-Flavor': 'Google' },
+    signal: AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(15000)]),
+  });
+  if (!response.ok) throw new WorkflowError('Worker metadata token is unavailable.');
+  return readJsonLimited(response, 65536);
+}
+
+async function metadataText(fetcher, signal, url) {
+  const response = await fetcher(url, {
+    redirect: 'error', headers: { 'Metadata-Flavor': 'Google' },
+    signal: AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(15000)]),
+  });
+  if (!response.ok) throw new WorkflowError('Worker session secret project is invalid.');
+  const text = await response.text();
+  return String(text || '').trim();
+}
+
+async function readOwnerSession(env, fetcher, signal) {
+  const result = await smCall(env, fetcher, signal, '/versions/latest:access');
+  if (result.status === 404 || result.status === 403) throw new WorkflowError('Worker owner authorization is missing, revoked or its last rotation was interrupted. Reauthorize it.');
+  if (!result.ok || typeof result.data?.payload?.data !== 'string') throw new WorkflowError('Worker session secret is unavailable.');
+  let payload;
+  try { payload = Buffer.from(result.data.payload.data, 'base64').toString('utf8'); } catch { payload = ''; }
+  if (!payload || payload === REVOKED) throw new WorkflowError('Worker owner authorization is missing, revoked or its last rotation was interrupted. Reauthorize it.');
+  return payload;
+}
+
+async function writeOwnerSession(env, fetcher, signal, ciphertext) {
+  const result = await smCall(env, fetcher, signal, ':addVersion', {
+    method: 'POST', body: { payload: { data: Buffer.from(ciphertext, 'utf8').toString('base64') } },
+  });
+  if (!result.ok) throw new WorkflowError('Worker credential rotation was not confirmed. Reauthorize if identity state requires it.');
+}
+
+export function createWorkflowIdentity({ env = process.env, fetcher = fetch } = {}) {
+  identityConfig(env);
   return {
     async getOwner(_env, _fetcher, signal) {
-      let row = await rpc('read');
-      if (!row?.ciphertext || row.state === 'reauthorize') throw new WorkflowError('Worker owner authorization is missing, revoked or its last rotation was interrupted. Reauthorize it.');
-      if (row.state !== 'ready') throw new WorkflowError('Another worker is rotating the owner session. Retry later.');
-      let session = openSession(row.ciphertext, env);
+      const ciphertext = await readOwnerSession(env, fetcher, signal);
+      let session = openSession(ciphertext, env);
       if (session.expires_at * 1000 < Date.now() + 360000) {
-        const holder = randomUUID();
-        const claim = await rpc('acquire', holder, row.revision);
-        if (claim?.state !== 'refreshing' || claim.holder !== holder) throw new WorkflowError('Another worker owns session rotation.');
         try {
           session = await refreshSession(session.refresh_token, env, fetcher, signal);
           await verifiedOwner(session, env, fetcher, signal);
           // Persist the rotated refresh token BEFORE exposing the access token.
-          // A commit timeout may have succeeded; never replay the old grant.
-          row = await rpc('commit', holder, row.revision, sealSession(session, env));
-        } catch {
-          try { await rpc('invalidate', holder, row.revision); } catch { /* expired refresh lease fails closed on read */ }
+          await writeOwnerSession(env, fetcher, signal, sealSession(session, env));
+        } catch (error) {
+          if (error instanceof WorkflowError && /rotation was not confirmed|Reauthorize if identity/.test(error.message)) throw error;
           throw new WorkflowError('Worker credential rotation was not confirmed. Reauthorize if identity state requires it.');
         }
       }
       try { return await verifiedOwner(session, env, fetcher, signal); }
-      catch (e) {
-        if (e.status === 401 || e.status === 403) {
-          const holder = randomUUID();
-          try {
-            const claim = await rpc('acquire', holder, row.revision);
-            if (claim?.holder === holder) await rpc('invalidate', holder, row.revision);
-          } catch { /* no work is dispatched on an invalid identity */ }
-        }
-        throw new WorkflowError('Worker owner verification failed. Check session revocation or Auth availability.');
-      }
+      catch { throw new WorkflowError('Worker owner verification failed. Check session revocation or Auth availability.'); }
     },
     async provision(refreshToken, signal) {
       if (!validToken(refreshToken)) throw new WorkflowError('A dedicated owner refresh token is required for provisioning.');
-      // Operator-only CLI; never an unauthenticated API and never a phone-token upload.
-      const row = await rpc('read');
-      if (row?.state === 'refreshing') throw new WorkflowError('Stop rotation before replacing worker identity.');
       const session = await refreshSession(refreshToken, env, fetcher, signal);
       await verifiedOwner(session, env, fetcher, signal);
-      await rpc('provision', null, null, sealSession(session, env));
+      await writeOwnerSession(env, fetcher, signal, sealSession(session, env));
     },
     async revoke(signal) {
-      const row = await rpc('read');
-      // Fence rotation/dispatch BEFORE asking Auth to revoke this session only.
-      await rpc('revoke');
-      if (!row?.ciphertext) return false;
-      const session = openSession(row.ciphertext, env), { url, key } = authConfig(env);
+      let session = null;
+      try { session = openSession(await readOwnerSession(env, fetcher, signal), env); } catch { /* already missing or unreadable */ }
+      await writeOwnerSession(env, fetcher, signal, REVOKED);
+      if (!session) return false;
+      const { url, key } = authConfig(env);
       const result = await fetcher(`${url}/auth/v1/logout?scope=local`, {
         method: 'POST', redirect: 'error', headers: { apikey: key, Authorization: `Bearer ${session.access_token}`, 'Content-Type': 'application/json' },
         body: '{}', signal: AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(15000)]),
@@ -135,5 +180,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       console.info(revoked ? 'Worker credential disabled; dedicated Auth session revocation confirmed.' : 'No registered worker credential; no Auth logout was attempted.');
     }
     else { await identity.provision(refresh); console.info('Worker owner session provisioned. Remove the bootstrap secret from the environment.'); }
-  } catch { console.error('Worker identity operation was not fully confirmed. Check credential state, owner, encryption key, Auth and migration; revoke only the dedicated worker session when needed. No credentials are logged.'); process.exitCode = 1; }
+  } catch { console.error('Worker identity operation was not fully confirmed. Check credential state, owner, encryption key, Auth and Secret Manager; revoke only the dedicated worker session when needed. No credentials are logged.'); process.exitCode = 1; }
 }

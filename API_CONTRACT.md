@@ -496,7 +496,7 @@ Control-plane actions map onto existing routes:
 | `POST /api/workflow-automation/triggers/:id/disable` | `{ "expectedRevision": 0 }` | `{ "registration": {} }` |
 | `POST /api/workflow-automation/deliver/:id` | signed webhook body | delivery result JSON |
 
-`DUA_WORKFLOWS_ENABLED=1` is required to enqueue or register. External deliver also needs `DUA_WORKFLOW_EXTERNAL_TRIGGERS_ENABLED=1`.
+`DUA_WORKFLOWS_ENABLED=1` is required to enqueue or register. External deliver also needs `DUA_WORKFLOW_EXTERNAL_TRIGGERS_ENABLED=1`. Authenticated workflow routes use the signed-in owner token with the anon key; a signed webhook still sends only `{ "eventId" }` after HMAC verification, and the server then uses the provisioned owner session. Response shapes are unchanged.
 
 ### Same-origin cookie proxies
 

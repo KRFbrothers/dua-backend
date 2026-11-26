@@ -10,8 +10,13 @@ export async function runWorkflowRuntime({ env = process.env, fetcher = fetch, s
   const engine = new URL(env.DUA_ENGINE_URL);
   if (engine.protocol !== 'https:' || engine.pathname !== '/' || engine.username || engine.password || engine.search || engine.hash) throw new WorkflowError('Invalid worker engine URL.');
   const identity = createWorkflowIdentity({ env, fetcher });
-  // Recovery keeps working during Auth outages/maintenance. It never starts work.
-  await executionDb('rpc/dua_workflow_recover', { env, fetcher, signal, body: { p_owner: owner } });
+  const recover = async (sig) => {
+    const session = await identity.getOwner(env, fetcher, sig);
+    if (session.user.id !== owner) throw new WorkflowError('Worker session does not belong to its configured owner.', 403);
+    await executionDb('rpc/dua_workflow_recover', { env, fetcher, signal: sig, token: session.token, body: { p_owner: session.user.id } });
+  };
+  // Recovery waits for a verified owner session; it never starts work.
+  await recover(signal);
   log('startup_configured');
   const recoveryStop = new AbortController();
   const recoverySignal = AbortSignal.any([signal, recoveryStop.signal]);
@@ -19,7 +24,7 @@ export async function runWorkflowRuntime({ env = process.env, fetcher = fetch, s
     while (!recoverySignal.aborted) {
       try {
         await delay(10000, undefined, { signal: recoverySignal });
-        await executionDb('rpc/dua_workflow_recover', { env, fetcher, signal: recoverySignal, body: { p_owner: owner } });
+        await recover(recoverySignal);
       } catch { if (!recoverySignal.aborted) log('recovery_unavailable'); }
     }
   })();
