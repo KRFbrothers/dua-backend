@@ -198,6 +198,7 @@ shipped behaviour; this file describes the target and the order of work.
   - Enforced redirect URL origin check against `WEB_ORIGINS` allowlist and server origin to strictly prevent open-redirect phishing.
   - Flipped `passwordReset: true` in `GET /api/config` and `GET /api/account/features`.
 - **Tests**: 11 new tests in `test_semantic_router.py` (all passing) and comprehensive password reset tests in `account.test.mjs` (all 452 Node tests passing).
+- **K7 wiring**: `classify_complexity` now picks the plain (non-agent) engine chat model behind `CHAT_MODEL_ROUTER` (default `0`): complex requests use `AGENT_MODEL` with `VERTEX_MODEL` fallback, the client `task` field is ignored, and the tier is logged on the server only. Agent intent stays in `route_agent`. `API_CONTRACT.md` (Semantic Cost Router) was corrected: no Claude route, no `dua_messages` write on the engine path, and the title/`@mention`/`/revise` paths are Node work.
 
 ## 4. Out of scope until separately approved
 

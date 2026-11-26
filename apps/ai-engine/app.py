@@ -20,6 +20,7 @@ Configuration comes only from environment variables; no secrets in code.
   AGENT_THINKING_LEVEL (low|medium|high; default low when AGENT_MODEL differs), AGENT_STEP_SECONDS, AGENT_TOOL_SECONDS, AGENT_NOTES (0 turns off
   the Agent's private Supabase notes; see agent_notes.py), VERTEX_THINKING_LEVEL (Gemini 3: low|medium|high, default low),
   THINKING_ROUTER (default 1; 0 restores env levels), THINKING_MAX_LEVEL (low|medium|high, default high),
+  CHAT_MODEL_ROUTER (default 0; 1 sends complex plain chats to AGENT_MODEL with VERTEX_MODEL fallback, see get_chat_model),
   SUPABASE_URL, SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY), DUA_ALLOWED_EMAIL (required owner authentication).
   DUA_APP_TOKEN is an optional additional gate, never a replacement for owner login.
 """
@@ -90,6 +91,8 @@ AGENT_ANSWER_TOKENS = min(65536, max(1, env_int("AGENT_ANSWER_TOKENS", 8192)))
 CONTINUE_HINT = 'Reply was cut off. Say "continue" to get the rest.'
 CHAT_WEB_SEARCH = os.environ.get("CHAT_WEB_SEARCH", "1")
 CHAT_CODE_EXECUTION = os.environ.get("CHAT_CODE_EXECUTION", "0")
+# Plain (non-agent) chat model tier router (PR J classify_complexity). Off by default; "1" turns it on.
+CHAT_MODEL_ROUTER = os.environ.get("CHAT_MODEL_ROUTER", "0").strip()
 AGENT_MAX_SOURCES = 12
 
 SSE_HEADERS = {
@@ -252,6 +255,20 @@ def get_model(system_text=SYSTEM_PROMPT):
             _models.clear()
         model = _models[system_text] = GenaiModel(system_text)
     return model
+
+
+def get_chat_model(system_text, data):
+    """Plain (non-agent) chat model. CHAT_MODEL_ROUTER=1: complex requests (PR J classify_complexity on the mode and
+    the last user text) use AGENT_MODEL with one fallback to VERTEX_MODEL; simple ones stay on VERTEX_MODEL.
+    Off (default) keeps every plain chat on VERTEX_MODEL. Client fields such as `task` never choose the tier."""
+    if CHAT_MODEL_ROUTER != "1":
+        return get_model(system_text)
+    mode = data.get("mode") if isinstance(data.get("mode"), str) else "auto"
+    tier = agent_models.classify_complexity(mode=mode, text=last_user_text(data.get("messages")))
+    app.logger.info("chat model tier: %s", tier)
+    if tier != agent_models.TIER_FRONTIER or AGENT_MODEL == MODEL_NAME:
+        return get_model(system_text)
+    return GenaiModel(system_text, AGENT_MODEL, fallback=MODEL_NAME)
 
 
 def make_part(text=None, data=None, mime_type=None):
