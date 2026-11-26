@@ -5,6 +5,7 @@ import { OFFICIAL_AGENTS, getStarterSkills, SLUG_REGEX } from '../src/core/agent
 import { filesEnv, router, SUPA, UID, OTHER } from './files-helpers.mjs';
 
 const env = { ...filesEnv, GEMINI_API_KEY: 'test-gemini-key', GEMINI_MODEL: 'gemini-3.8-flash' };
+const workflowEnv = { ...env, DUA_WORKFLOWS_ENABLED: '1' };
 
 function call(method, path, body, { token = 'user-token', headers = {} } = {}) {
   return new Request('https://dua.test' + path, {
@@ -25,6 +26,7 @@ function database() {
   const triggers = [];
   const notifications = [];
   const deviceTokens = [];
+  const enqueued = [];
   let clock = Date.parse('2026-11-19T00:00:00Z');
   const stamp = () => new Date(clock += 1000).toISOString();
   const ownerOf = init => new Headers(init.headers).get('authorization') === 'Bearer user-token' ? UID : 'nobody';
@@ -61,6 +63,19 @@ function database() {
   };
 
   const routes = [
+    [url => url === `${SUPA}/rest/v1/rpc/dua_workflow_enqueue`, (url, init) => {
+      const headers = new Headers(init.headers);
+      if (headers.get('authorization') !== 'Bearer user-token' || headers.get('apikey') === env.SUPABASE_SERVICE_ROLE_KEY)
+        return Response.json({ message: 'denied' }, { status: 401 });
+      const body = JSON.parse(init.body);
+      if (body.p_owner !== UID) return Response.json({ message: 'denied' }, { status: 403 });
+      if (enqueued.some(run => run.workflow_id === body.p_workflow && run.status === 'queued'))
+        return Response.json({ message: 'workflow_active' }, { status: 409 });
+      const run = { id: crypto.randomUUID(), owner_id: body.p_owner, workflow_id: body.p_workflow, title: body.p_title, request_key: body.p_key,
+        definition: body.p_definition, status: 'queued', attempt: 1, steps: [] };
+      enqueued.push(run);
+      return Response.json(run);
+    }],
     [url => url.startsWith(`${SUPA}/rest/v1/`), (url, init) => {
       const parsed = new URL(url);
       const table = parsed.pathname.split('/').pop();
@@ -146,7 +161,7 @@ function database() {
     }]
   ];
 
-  return { agents, skills, instructions, triggers, notifications, deviceTokens, routes };
+  return { agents, skills, instructions, triggers, notifications, deviceTokens, enqueued, routes };
 }
 
 test('starter skills load from dua_agent_prompts.json and official agents are defined', () => {
@@ -435,12 +450,14 @@ test('Phase 4C: Proactive Agents — Triggers CRUD & Run (GET, POST, PUT, DELETE
   assert.equal(updatedTrigger.prompt, 'Updated morning summary');
 
   // 5. POST run trigger manually
-  const runRes = await handleService(call('POST', `/api/agents/dua-agent/triggers/${trigger.id}/run`), { env, fetcher });
+  const runRes = await handleService(call('POST', `/api/agents/dua-agent/triggers/${trigger.id}/run`), { env: workflowEnv, fetcher });
   assert.equal(runRes.status, 200);
   const runJson = await runRes.json();
   assert.equal(runJson.triggered, true);
   assert.ok(runJson.trigger.lastRunAt);
-  assert.deepEqual(runJson.push, { dispatched: false, reason: 'fcm_not_configured', count: 0 });
+  assert.deepEqual(runJson.push, { dispatched: false, reason: 'queued', count: 0 });
+  assert.equal(runJson.status, 'queued');
+  assert.ok(runJson.runId);
 
   // 6. DELETE trigger
   const delRes = await handleService(call('DELETE', `/api/agents/dua-agent/triggers/${trigger.id}`), { env, fetcher });
@@ -452,119 +469,54 @@ test('Phase 4C: Proactive Agents — Triggers CRUD & Run (GET, POST, PUT, DELETE
   assert.equal((await emptyList.json()).triggers.length, 0);
 });
 
-test('Phase 4C: trigger run awaits the notification insert and FCM push before responding', async () => {
+test('K6: trigger run queues a real agent run for the worker and sends no push at request time', async () => {
   const db = database();
-  const fetcher = router(db.routes);
-  const created = await handleService(call('POST', '/api/agents/dua-agent/triggers', {
-    triggerType: 'schedule',
-    cronExpr: '0 9 * * 1-5',
-    prompt: 'Morning summary',
-  }), { env, fetcher });
-  const { trigger } = await created.json();
+  db.agents.push({ id: 'research-bot', owner_id: UID, name: 'Research Bot', system_prompt: 'You are Research Bot.' });
+  const fetcher = router([
+    ...db.routes,
+    [url => url.includes('fcm.googleapis.com') || url.includes('generativelanguage.googleapis.com'), () => { throw new Error('no provider or push at request time'); }],
+  ]);
+  const conversationId = '11111111-2222-4333-8444-555555555555';
+  db.triggers.push({ id: '22222222-3333-4444-8555-666666666666', owner_id: UID, agent_id: 'research-bot', conversation_id: conversationId,
+    trigger_type: 'schedule', cron_expr: '0 9 * * *', prompt: 'Morning research digest', enabled: true, last_run_at: null, created_at: '2026-11-19T00:00:00Z' });
   db.deviceTokens.push({ owner_id: UID, token: 'device-fcm-token', platform: 'android' });
 
-  let releasePush;
-  const pushGate = new Promise(resolve => { releasePush = resolve; });
-  let pushStarted;
-  const pushStartedGate = new Promise(resolve => { pushStarted = resolve; });
-  let releaseInsert;
-  const insertGate = new Promise(resolve => { releaseInsert = resolve; });
-  let insertStarted;
-  const insertStartedGate = new Promise(resolve => { insertStarted = resolve; });
-  let insertedBody = null;
-  let responded = false;
-  const gated = router([
-    [(url, init) => (init.method || 'GET') === 'POST' && url.includes('/rest/v1/dua_notifications'), async (url, init) => {
-      insertedBody = JSON.parse(init.body);
-      insertStarted();
-      await insertGate;
-      db.notifications.push(insertedBody);
-      return Response.json([insertedBody], { status: 201 });
-    }],
-    ...db.routes,
-    [url => url.includes('metadata.google.internal') || url.includes('oauth2.googleapis.com'), () => Response.json({ access_token: 'ya29.test', expires_in: 3600 })],
-    [url => url.includes('fcm.googleapis.com'), async () => {
-      pushStarted();
-      await pushGate;
-      return Response.json({ name: 'projects/dua-project/messages/1' });
-    }],
-  ]);
-
-  const pending = handleService(call('POST', `/api/agents/dua-agent/triggers/${trigger.id}/run`), {
-    env: { ...env, FCM_PROJECT_ID: 'dua-project', FCM_ACCESS_TOKEN: 'ya29.test' },
-    fetcher: gated,
-  }).then(response => {
-    responded = true;
-    return response;
-  });
-
-  await pushStartedGate;
-  assert.equal(responded, false);
-  assert.equal(db.notifications.length, 0);
-
-  releasePush();
-  await insertStartedGate;
-  assert.equal(responded, false);
-  assert.equal(db.notifications.length, 0);
-  assert.ok(gated.calls.some(item => item.url.includes('fcm.googleapis.com')));
-  assert.equal(insertedBody.status, 'sent');
-  assert.equal(insertedBody.sent_at, db.triggers.find(row => row.id === trigger.id).last_run_at);
-  assert.equal(insertedBody.data.triggerId, trigger.id);
-
-  releaseInsert();
-  const runRes = await pending;
-  assert.equal(responded, true);
+  const runRes = await handleService(call('POST', '/api/agents/research-bot/triggers/22222222-3333-4444-8555-666666666666/run', { source: { type: 'agent_trigger', triggerId: 'forged' } }),
+    { env: { ...workflowEnv, FCM_PROJECT_ID: 'dua-project', FCM_ACCESS_TOKEN: 'ya29.test' }, fetcher });
   assert.equal(runRes.status, 200);
   const runJson = await runRes.json();
-  assert.equal(runJson.triggered, true);
-  assert.deepEqual(runJson.push, { dispatched: true, count: 1 });
-  assert.equal(db.notifications.length, 1);
-  assert.equal(db.notifications[0].owner_id, UID);
-  assert.equal(db.notifications[0].agent_id, 'dua-agent');
-  assert.equal(db.notifications[0].body, 'Morning summary');
-  assert.equal(db.notifications[0].data.triggerId, trigger.id);
-  assert.equal(db.notifications[0].status, 'sent');
-  assert.equal(db.notifications[0].sent_at, db.triggers.find(row => row.id === trigger.id).last_run_at);
-  const sent = gated.calls.find(item => item.url.includes('fcm.googleapis.com'));
-  assert.ok(sent);
-  assert.equal(sent.json.message.token, 'device-fcm-token');
+  assert.deepEqual(runJson.push, { dispatched: false, reason: 'queued', count: 0 });
+  assert.equal(runJson.status, 'queued');
+  assert.equal(runJson.runId, db.enqueued[0].id);
+  assert.equal(db.notifications.length, 0);
+  assert.ok(db.triggers[0].last_run_at);
+
+  const run = db.enqueued[0];
+  assert.equal(run.workflow_id, 'agent-trigger:22222222-3333-4444-8555-666666666666');
+  assert.match(run.request_key, /^run:22222222-3333-4444-8555-666666666666:\d+$/);
+  assert.equal(run.title, 'Trigger: Research Bot');
+  assert.deepEqual(run.definition.source, { type: 'agent_trigger', triggerId: '22222222-3333-4444-8555-666666666666', triggerType: 'schedule', agentId: 'research-bot', conversationId });
+  assert.equal(run.definition.steps.length, 1);
+  assert.equal(run.definition.steps[0].prompt, 'Morning research digest');
+  assert.equal(run.definition.steps[0].agentId, 'research-bot');
+  assert.deepEqual(run.definition.steps[0].allowedTools, ['fetch_url', 'google_search', 'search_documents', 'search_notes']);
+
+  // A second run while the first is still active is refused, not duplicated.
+  const again = await handleService(call('POST', '/api/agents/research-bot/triggers/22222222-3333-4444-8555-666666666666/run'), { env: workflowEnv, fetcher });
+  assert.equal(again.status, 409);
+  assert.equal(db.enqueued.length, 1);
 });
 
-test('Phase 4C: trigger notification status is pending or failed when push does not send', async () => {
-  const pendingDb = database();
-  const pendingFetcher = router(pendingDb.routes);
-  const created = await handleService(call('POST', '/api/agents/dua-agent/triggers', {
-    triggerType: 'webhook',
-    prompt: 'Pending summary',
-  }), { env, fetcher: pendingFetcher });
-  const pendingTrigger = (await created.json()).trigger;
-  const pendingRun = await handleService(call('POST', `/api/agents/dua-agent/triggers/${pendingTrigger.id}/run`), { env, fetcher: pendingFetcher });
-  assert.equal(pendingRun.status, 200);
-  assert.deepEqual((await pendingRun.json()).push, { dispatched: false, reason: 'fcm_not_configured', count: 0 });
-  assert.equal(pendingDb.notifications.length, 1);
-  assert.equal(pendingDb.notifications[0].status, 'pending');
-  assert.equal(pendingDb.notifications[0].sent_at, null);
-
-  const failedDb = database();
-  failedDb.deviceTokens.push({ owner_id: UID, token: 'device-fcm-token', platform: 'android' });
-  const failedFetcher = router([
-    ...failedDb.routes,
-    [url => url.includes('fcm.googleapis.com'), () => Response.json({ error: 'unavailable' }, { status: 500 })],
-  ]);
-  const failedCreated = await handleService(call('POST', '/api/agents/dua-agent/triggers', {
-    triggerType: 'webhook',
-    prompt: 'Failed summary',
-  }), { env, fetcher: failedFetcher });
-  const failedTrigger = (await failedCreated.json()).trigger;
-  const failedRun = await handleService(call('POST', `/api/agents/dua-agent/triggers/${failedTrigger.id}/run`), {
-    env: { ...env, FCM_PROJECT_ID: 'dua-project', FCM_ACCESS_TOKEN: 'ya29.test' },
-    fetcher: failedFetcher,
-  });
-  assert.equal(failedRun.status, 200);
-  assert.deepEqual((await failedRun.json()).push, { dispatched: false, count: 0 });
-  assert.equal(failedDb.notifications.length, 1);
-  assert.equal(failedDb.notifications[0].status, 'failed');
-  assert.equal(failedDb.notifications[0].sent_at, null);
+test('K6: trigger run needs the workflow worker flag and never enqueues without it', async () => {
+  const db = database();
+  const fetcher = router(db.routes);
+  const created = await handleService(call('POST', '/api/agents/dua-agent/triggers', { triggerType: 'webhook', prompt: 'Pending summary' }), { env, fetcher });
+  const { trigger } = await created.json();
+  const res = await handleService(call('POST', `/api/agents/dua-agent/triggers/${trigger.id}/run`), { env, fetcher });
+  assert.equal(res.status, 503);
+  assert.equal(db.enqueued.length, 0);
+  assert.equal(db.notifications.length, 0);
+  assert.equal(db.triggers[0].last_run_at ?? null, null);
 });
 
 test('Phase 4C: Proactive Agents — Validation & 404s for nonexistent agents or invalid triggers', async () => {

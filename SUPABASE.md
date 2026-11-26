@@ -154,6 +154,8 @@ Apply `supabase/migrations/202611260001_workflow_rpcs_authenticated.sql` after t
 
 `dua-api` and the workflow worker call these RPCs only with the signed-in owner's access token and the anon key (see [API_CONTRACT.md](API_CONTRACT.md)). External webhook delivery still verifies the HMAC first, then uses a provisioned owner session. `SUPABASE_SERVICE_ROLE_KEY` remains for quota, Imagine, live-voice start, account deletion and the scheduled backup job, not for these workflow tables.
 
+**Agent triggers (K6):** the same worker also runs PR H agent triggers. `/run` queues a one-step execution; with `DUA_WORKFLOW_AUTOMATION_ENABLED=1` each worker tick also reads the owner's enabled `schedule` rows in `dua_agent_triggers` (owner token + anon key), queues the latest due IST cron slot with request key `trg:<id>:<slotEpoch>` and sets `last_run_at` to that slot. On completion the worker inserts into `dua_messages` (only the columns granted by `202611260002`) and `dua_notifications`, then sends the FCM push, all as the owner. No new tables, grants or migrations are needed. Unreadable cron rows are skipped and logged as `trigger_cron_invalid` (trigger ID only, never the prompt).
+
 **Deploy order:** apply this migration, then deploy `dua-api` (and update the VM worker) in the same window if workflow execution is enabled. After the migration, a service-role call has a null `auth.uid()` and is refused. Creating the Secret Manager session secret and granting `secretAccessor` plus `secretVersionAdder` on that one secret are separate, approved live steps; do not pin that secret as a Cloud Run env binding.
 
 

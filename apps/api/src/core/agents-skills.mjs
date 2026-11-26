@@ -14,7 +14,7 @@ import { readJsonLimited } from './limited-json.mjs';
 import { resolveOwner, StorageError } from './storage.mjs';
 import { guardChatAccess } from './access-policy.mjs';
 import { extractReply } from './adapters.mjs';
-import { dispatchPushNotification } from './notifications.mjs';
+import { agentTriggerDefinition, enqueueExecution, requireEnabled, WorkflowError } from './workflow-execution.mjs';
 
 const noStore = (error, status) => Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
 const ok = (body, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -540,9 +540,30 @@ export async function handleAgentsSkills(request, { env = process.env, fetcher =
           }
 
           // POST /api/agents/:id/triggers/:triggerId/run
+          // K6: queues a real agent run for the one server worker. The worker sends the push and the
+          // notification when the run finishes (and saves the reply into conversationId, when set).
           if (parts.length === 6 && parts[5] === 'run') {
             const triggerId = parts[4];
             if (!UUID_REGEX.test(triggerId)) return noStore('Not found.', 404);
+            const found = await db('dua_agent_triggers', `?select=*&id=eq.${encodeURIComponent(triggerId)}&agent_id=eq.${encodeURIComponent(agentId)}&${ownerFilter}&limit=1`, { method: 'GET' });
+            if (!found.ok) return upstreamFailure(found.status, 'Triggers');
+            const trigger = (await rowsOf(found))?.[0];
+            if (!trigger) return noStore('That trigger was not found.', 404);
+            try { requireEnabled(env); }
+            catch (error) { return noStore(error.message, error.status || 503); }
+
+            let agentName = OFFICIAL_AGENTS.find(agent => agent.id === agentId)?.name || null;
+            const agentRes = await db('dua_agents', `?select=name&id=eq.${encodeURIComponent(agentId)}&${ownerFilter}&limit=1`, { method: 'GET' });
+            if (agentRes.ok) agentName = (await rowsOf(agentRes))?.[0]?.name || agentName;
+
+            let run;
+            try {
+              const job = agentTriggerDefinition(trigger, agentName);
+              run = await enqueueExecution({ ownerId: owner.user.id, requestKey: `run:${trigger.id}:${Date.now()}`, ...job },
+                { env, fetcher, signal: request.signal, token: owner.token });
+            } catch (error) {
+              return noStore(error instanceof WorkflowError ? error.message : 'Workflow execution is unavailable. Retry.', error.status || 503);
+            }
 
             const now = new Date().toISOString();
             const response = await db('dua_agent_triggers', `?select=*&id=eq.${encodeURIComponent(triggerId)}&agent_id=eq.${encodeURIComponent(agentId)}&${ownerFilter}`, {
@@ -550,44 +571,15 @@ export async function handleAgentsSkills(request, { env = process.env, fetcher =
               headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
               body: JSON.stringify({ last_run_at: now }),
             });
-            if (!response.ok) return upstreamFailure(response.status, 'Triggers');
-            const rows = await rowsOf(response);
-            if (!rows || !rows.length) return noStore('That trigger was not found.', 404);
-
-            // Push first, then record the real delivery status. Cloud Run stays awake until both finish.
-            const notifRow = {
-              owner_id: owner.user.id,
-              conversation_id: rows[0].conversation_id || null,
-              agent_id: agentId,
-              title: `Proactive Trigger: ${agentId}`,
-              body: rows[0].prompt || 'Trigger executed',
-              data: { triggerId, triggerType: rows[0].trigger_type },
-              status: 'pending',
-              sent_at: null,
-              created_at: now,
-            };
-            const pushResult = await dispatchPushNotification({
-              ownerId: owner.user.id,
-              ownerToken: owner.token,
-              notification: notifRow,
-              env,
-              fetcher,
-            }).catch(() => ({ dispatched: false, reason: 'dispatch_error', count: 0 }));
-            if (pushResult?.dispatched) {
-              notifRow.status = 'sent';
-              notifRow.sent_at = now;
-            } else if (pushResult?.reason === 'fcm_not_configured' || pushResult?.reason === 'no_devices_registered') {
-              notifRow.status = 'pending';
-            } else {
-              notifRow.status = 'failed';
-            }
-            await db('dua_notifications', '?select=*', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-              body: JSON.stringify(notifRow),
-            }).catch(() => {});
-
-            return ok({ triggered: true, trigger: presentTrigger(rows[0]), push: pushResult });
+            const updated = response.ok ? (await rowsOf(response))?.[0] : null;
+            return ok({
+              triggered: true,
+              trigger: presentTrigger(updated || trigger),
+              // Kept for older clients: the push now comes from the worker when the run finishes.
+              push: { dispatched: false, reason: 'queued', count: 0 },
+              runId: run.id,
+              status: run.status,
+            });
           }
 
           return noStore('Not found.', 404);

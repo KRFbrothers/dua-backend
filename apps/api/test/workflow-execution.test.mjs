@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { handleWorkflowExecution, normalizeDefinition } from '../src/core/workflow-execution.mjs';
+import { agentTriggerDefinition, handleWorkflowExecution, normalizeDefinition } from '../src/core/workflow-execution.mjs';
 import { readAgentOutput, runWorkerOnce } from '../src/core/workflow-worker.mjs';
 import { filesEnv, router, SUPA, UID } from './files-helpers.mjs';
 
@@ -19,11 +19,12 @@ test('execution derives owner; client lifecycle and owner fields cannot manufact
     assert.equal(call.json.p_owner, UID);
     assert.equal(call.json.p_definition.status, undefined);
     assert.equal(call.json.p_definition.steps[0].status, undefined);
+    assert.equal(call.json.p_definition.source, undefined, 'server-only source is never taken from a client body');
     assert.equal(call.headers.get('authorization'), 'Bearer user-token');
     assert.equal(call.headers.get('apikey'), 'sb_publishable_test');
     return Response.json(row);
   }]]);
-  const data = { ...sample(), owner: 'other', status: 'succeeded' };
+  const data = { ...sample(), owner: 'other', status: 'succeeded', source: { type: 'agent_trigger', triggerId: 'forged', conversationId: 'forged' } };
   data.steps[0].status = 'succeeded';
   const response = await handleWorkflowExecution(request(data), { env, fetcher });
   assert.equal(response.status, 202);
@@ -155,4 +156,91 @@ test('history and get-one use the owner access token and the anon key', async ()
   assert.equal((await list.json()).runs[0].id, row.id);
   const one = await handleWorkflowExecution(new Request('https://dua.test/api/workflow-executions/' + row.id, { headers: { authorization: 'Bearer user-token' } }), { env, fetcher });
   assert.equal(one.status, 200);
+});
+
+// K6: agent trigger runs (PR H) through the same worker.
+const TRIGGER = { id: '22222222-3333-4444-8555-666666666666', agent_id: 'research-bot', conversation_id: '33333333-4444-4555-8666-777777777777',
+  trigger_type: 'schedule', prompt: 'Morning research digest' };
+function triggerHarness({ engineOk = true, fcm = false } = {}) {
+  const job = agentTriggerDefinition(TRIGGER, 'Research Bot');
+  let run = { ...row, owner_id: UID, workflow_id: job.workflowId, definition: job.definition, steps: [{ id: 'trigger', agentName: 'Research Bot', status: 'queued', output: '' }] };
+  const saved = { messages: [], notifications: [], chats: [], pushes: [] };
+  const fetcher = router([
+    [SUPA + '/rest/v1/rpc/dua_workflow_claim', () => Response.json([run])],
+    [SUPA + '/rest/v1/rpc/dua_workflow_checkpoint', (_url, _init, call) => {
+      run = { ...run, status: call.json.p_status, steps: call.json.p_steps ?? run.steps };
+      return Response.json(run);
+    }],
+    [SUPA + '/rest/v1/dua_agents?', (url, _init, call) => {
+      assert.equal(call.headers.get('authorization'), 'Bearer user-token');
+      assert.equal(call.headers.get('apikey'), 'sb_publishable_test');
+      assert.match(url, /id=eq\.research-bot/);
+      return Response.json([{ system_prompt: 'You are Research Bot.' }]);
+    }],
+    [SUPA + '/rest/v1/dua_messages', (_url, init, call) => {
+      assert.equal(call.headers.get('authorization'), 'Bearer user-token');
+      saved.messages.push(call.json);
+      return new Response(null, { status: 201 });
+    }],
+    [SUPA + '/rest/v1/dua_notifications', (_url, _init, call) => {
+      assert.equal(call.headers.get('authorization'), 'Bearer user-token');
+      saved.notifications.push(call.json);
+      return new Response(null, { status: 201 });
+    }],
+    [SUPA + '/rest/v1/dua_device_tokens', () => Response.json([{ token: 'device-fcm-token', platform: 'android' }])],
+    [url => url.includes('fcm.googleapis.com'), (_url, _init, call) => { saved.pushes.push(call.json); return Response.json({ name: 'projects/p/messages/1' }); }],
+    ['https://engine.test/api/agent/capabilities', () => Response.json({ tools: ['google_search', 'search_notes'], toolCatalog: [] })],
+    ['https://engine.test/api/chat', (_url, _init, call) => {
+      saved.chats.push(call.json);
+      if (!engineOk) return Response.json({ error: 'down' }, { status: 502 });
+      return new Response(stream([{ type: 'text', delta: 'Digest ready' }, { type: 'done' }]), { headers: { 'content-type': 'text/event-stream' } });
+    }],
+  ]);
+  const runEnv = { ...env, DUA_ENGINE_URL: 'https://engine.test', ...(fcm ? { FCM_PROJECT_ID: 'dua-project', FCM_ACCESS_TOKEN: 'ya29.test' } : {}) };
+  const getOwner = async () => ({ user: { id: UID }, token: 'user-token', request: request(sample()) });
+  return { fetcher, saved, runEnv, getOwner, get run() { return run; } };
+}
+
+test('K6 worker: trigger run uses the agent persona, keeps only engine-offered read tools, then saves reply + notification + push', async () => {
+  const h = triggerHarness({ fcm: true });
+  await runWorkerOnce({ env: h.runEnv, fetcher: h.fetcher, getOwner: h.getOwner, log: () => {} });
+  assert.equal(h.run.status, 'succeeded');
+  assert.equal(h.saved.chats.length, 1);
+  assert.equal(h.saved.chats[0].systemInstruction, 'You are Research Bot.');
+  assert.deepEqual(h.saved.chats[0].allowedTools, ['google_search', 'search_notes']);
+  assert.equal(h.saved.chats[0].messages.at(-1).text, 'Morning research digest');
+  assert.deepEqual(h.saved.messages, [{ conversation_id: TRIGGER.conversation_id, owner_id: UID, agent_id: 'research-bot', role: 'assistant', content: 'Digest ready', model: null }]);
+  assert.equal(h.saved.notifications.length, 1);
+  const note = h.saved.notifications[0];
+  assert.equal(note.title, 'Research Bot finished');
+  assert.equal(note.body, 'Digest ready');
+  assert.equal(note.status, 'sent');
+  assert.ok(note.sent_at);
+  assert.equal(note.conversation_id, TRIGGER.conversation_id);
+  assert.deepEqual(note.data, { triggerId: TRIGGER.id, triggerType: 'schedule', runId: row.id, status: 'succeeded', conversationId: TRIGGER.conversation_id });
+  assert.equal(h.saved.pushes.length, 1);
+  assert.equal(h.saved.pushes[0].message.token, 'device-fcm-token');
+});
+
+test('K6 worker: failed trigger run records failure and sends a failure notification (pending without FCM)', async () => {
+  const h = triggerHarness({ engineOk: false });
+  await runWorkerOnce({ env: h.runEnv, fetcher: h.fetcher, getOwner: h.getOwner, log: () => {} });
+  assert.equal(h.run.status, 'failed');
+  assert.equal(h.saved.messages.length, 0);
+  assert.equal(h.saved.notifications.length, 1);
+  assert.equal(h.saved.notifications[0].title, 'Research Bot trigger failed');
+  assert.equal(h.saved.notifications[0].status, 'pending');
+  assert.equal(h.saved.notifications[0].data.status, 'failed');
+  assert.equal(h.saved.pushes.length, 0);
+});
+
+test('K6 worker: client-defined workflows get no trigger notification and still fail on missing tools', async () => {
+  const h = triggerHarness();
+  const fetcher = router([
+    [SUPA + '/rest/v1/rpc/dua_workflow_claim', () => Response.json([{ ...row, owner_id: UID, definition: normalizeDefinition({ ...sample(), steps: [{ ...sample().steps[0], allowedTools: ['fetch_url'] }] }), steps: [{ id: 'research', status: 'queued', output: '' }] }])],
+    [SUPA + '/rest/v1/rpc/dua_workflow_checkpoint', (_url, _init, call) => Response.json({ ...row, status: call.json.p_status })],
+    ['https://engine.test/api/agent/capabilities', () => Response.json({ tools: ['google_search'], toolCatalog: [] })],
+  ]);
+  await runWorkerOnce({ env: h.runEnv, fetcher, getOwner: h.getOwner, log: () => {} });
+  assert.equal(fetcher.calls.some(c => c.url.includes('/api/chat') || c.url.includes('dua_notifications')), false);
 });
