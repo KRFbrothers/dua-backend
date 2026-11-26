@@ -193,6 +193,7 @@ def test_chat_route_loads_custom_skills_with_owner_token(supabase_env, monkeypat
 
     monkeypatch.setattr(engine, "owner_access_error", allow)
     monkeypatch.setattr(engine, "custom_skills_for", fake_custom)
+    monkeypatch.setattr(engine, "build_contents", lambda messages, attachments: [])  # CI has no google-genai
     r = engine.app.test_client().post("/api/chat", json={
         "model": "Dua", "mode": "agent", "stream": True, "skills": ["mine"],
         "messages": [{"role": "user", "text": "hi"}]})
