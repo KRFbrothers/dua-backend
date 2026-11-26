@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { resolveOwner, StorageError } from './storage.mjs';
 import { readJsonLimited } from './limited-json.mjs';
 import { executionDb, normalizeDefinition, requireEnabled, WorkflowError } from './workflow-execution.mjs';
+import { createWorkflowIdentity } from './workflow-identity.mjs';
 import { browserOriginAllowed } from './cors.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -28,7 +29,9 @@ async function webhook(request, id, { env, fetcher }) {
   const data = JSON.parse(raw.toString('utf8'));
   if (!data || typeof data.eventId !== 'string' || !data.eventId.trim() || data.eventId.length > 100 || Object.keys(data).some(k => k !== 'eventId'))
     return reply({ error: 'Only a stable eventId is accepted. Event payloads cannot change workflow instructions.' }, 400);
-  const run = await executionDb('rpc/dua_workflow_deliver', { env, fetcher, signal: request.signal, body: { p_owner: env.DUA_WORKFLOW_OWNER_ID, p_id: id, p_event: data.eventId } });
+  const session = await createWorkflowIdentity({ env, fetcher }).getOwner(env, fetcher, request.signal);
+  if (session.user.id !== env.DUA_WORKFLOW_OWNER_ID) throw new WorkflowError('Worker session does not belong to its configured owner.', 403);
+  const run = await executionDb('rpc/dua_workflow_deliver', { env, fetcher, signal: request.signal, token: session.token, body: { p_owner: session.user.id, p_id: id, p_event: data.eventId } });
   return reply({ runId: run.id, status: run.status }, 202);
 }
 
@@ -54,7 +57,7 @@ export async function handleWorkflowAutomation(request, { env = process.env, fet
     if (delivery && uuid.test(delivery[1])) return await webhook(request, delivery[1], { env, fetcher });
     if (!browserOriginAllowed(request, url, env)) return reply({ error: 'Request origin is not allowed.' }, 403);
     const owner = await resolveOwner(request, { env, fetcher, feature: 'workflow automation' });
-    const opts = { env, fetcher, signal: request.signal };
+    const opts = { env, fetcher, signal: request.signal, token: owner.token };
     if (request.method === 'GET' && suffix === '') {
       const filter = url.searchParams.get('workflowId');
       if (filter && filter.length > 100) return reply({ error: 'Invalid workflow ID.' }, 400);

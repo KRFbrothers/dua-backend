@@ -4,8 +4,32 @@ import { createWorkflowIdentity, sealSession, openSession, identityConfig } from
 import { filesEnv, router, SUPA, UID, OTHER } from './files-helpers.mjs';
 
 // Synthetic fixtures only; no valid session or production secret.
-const env = { ...filesEnv, SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_fixture', DUA_WORKFLOW_OWNER_ID: UID, DUA_WORKFLOW_CREDENTIAL_KEY: Buffer.alloc(32, 7).toString('base64') };
+const PROJECT = 'dua-test-project';
+const SECRET = 'DUA_WORKFLOW_OWNER_SESSION';
+const META_TOKEN = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token';
+const SM_ACCESS = `https://secretmanager.googleapis.com/v1/projects/${PROJECT}/secrets/${SECRET}/versions/latest:access`;
+const SM_ADD = `https://secretmanager.googleapis.com/v1/projects/${PROJECT}/secrets/${SECRET}:addVersion`;
+const env = { ...filesEnv, DUA_WORKFLOW_OWNER_ID: UID, DUA_WORKFLOW_CREDENTIAL_KEY: Buffer.alloc(32, 7).toString('base64'), GOOGLE_CLOUD_PROJECT: PROJECT };
 const token = seconds => 'fixture.' + Buffer.from(JSON.stringify({ sub: UID, exp: Math.floor(Date.now() / 1000) + seconds })).toString('base64url') + '.fixture';
+const pack = value => Buffer.from(value, 'utf8').toString('base64');
+
+function smRoutes({ latest, onAdd, addStatus = 200 }) {
+  return [
+    [META_TOKEN, () => Response.json({ access_token: 'metadata-token' })],
+    [SM_ACCESS, () => {
+      if (latest === null) return Response.json({ error: 'not found' }, { status: 404 });
+      return Response.json({ payload: { data: pack(latest) } });
+    }],
+    [SM_ADD, (_url, _init, call) => {
+      assert.equal(call.headers.get('authorization'), 'Bearer metadata-token');
+      const text = Buffer.from(call.json.payload.data, 'base64').toString('utf8');
+      onAdd?.(text);
+      if (addStatus !== 200) return Response.json({ error: 'write failed' }, { status: addStatus });
+      latest = text;
+      return Response.json({ name: `projects/${PROJECT}/secrets/${SECRET}/versions/2` });
+    }],
+  ];
+}
 
 test('credential ciphertext is bound to owner/project and detects tampering', () => {
   const session = { access_token: token(3600), refresh_token: 'fixture-refresh', expires_at: 1 };
@@ -21,20 +45,18 @@ test('credential ciphertext is bound to owner/project and detects tampering', ()
 test('rotation persists the NEW refresh token before exposing a verified access token', async () => {
   const old = { access_token: token(30), refresh_token: 'old-fixture', expires_at: Math.floor(Date.now() / 1000) + 30 };
   const freshToken = token(3600);
-  let row = { owner_id: UID, state: 'ready', revision: 1, ciphertext: sealSession(old, env) }, committed = false;
+  let latest = sealSession(old, env), committed = false;
   const fetcher = router([
-    [SUPA + '/rest/v1/rpc/dua_workflow_identity', (_url, _init, call) => {
-      const data = call.json;
-      if (data.p_action === 'acquire') row = { ...row, state: 'refreshing', holder: data.p_holder };
-      if (data.p_action === 'commit') {
-        assert.equal(openSession(data.p_ciphertext, env).refresh_token, 'new-fixture');
-        assert.equal(data.p_revision, 1);
-        row = { ...row, ciphertext: data.p_ciphertext, revision: 2, state: 'ready', holder: null }; committed = true;
-      }
-      return Response.json(row);
-    }],
+    ...smRoutes({
+      get latest() { return latest; },
+      onAdd(text) {
+        assert.equal(openSession(text, env).refresh_token, 'new-fixture');
+        latest = text; committed = true;
+      },
+    }),
     [SUPA + '/auth/v1/token?grant_type=refresh_token', (_url, _init, call) => {
       assert.equal(call.json.refresh_token, 'old-fixture');
+      assert.equal(committed, false);
       return Response.json({ access_token: freshToken, refresh_token: 'new-fixture', user: { email_confirmed_at: 'synthetic-confirmation' } });
     }],
   ]);
@@ -42,29 +64,32 @@ test('rotation persists the NEW refresh token before exposing a verified access 
   assert.equal(committed, true);
   assert.equal(owner.user.id, UID);
   assert.equal(owner.token, freshToken);
+  assert.equal(fetcher.find(SUPA + '/rest/v1/rpc/dua_workflow_identity').length, 0);
 });
 
-test('another rotation holder or a crashed grant never replays the old token', async () => {
-  for (const state of ['refreshing', 'reauthorize']) {
-    const fetcher = router([[SUPA + '/rest/v1/rpc/dua_workflow_identity', () => Response.json({ state, ciphertext: 'unreadable' })]]);
+test('a missing, revoked or unreadable session never refreshes the old token', async () => {
+  for (const latest of [null, '{"state":"reauthorize"}', 'unreadable']) {
+    const fetcher = router(smRoutes({ latest }));
     await assert.rejects(createWorkflowIdentity({ env, fetcher }).getOwner());
     assert.equal(fetcher.find(SUPA + '/auth/v1/token').length, 0);
+    assert.equal(fetcher.find(SM_ADD).length, 0);
   }
 });
 
-test('unknown refresh result invalidates the held revision instead of replaying a grant', async () => {
-  let row = { state: 'ready', revision: 5, ciphertext: sealSession({ access_token: token(1), refresh_token: 'fixture', expires_at: 1 }, env) };
-  let invalidated = false;
-  const fetcher = router([
-    [SUPA + '/rest/v1/rpc/dua_workflow_identity', (_url, _init, call) => {
-      if (call.json.p_action === 'acquire') row = { ...row, state: 'refreshing', holder: call.json.p_holder };
-      if (call.json.p_action === 'invalidate') { invalidated = true; row = { ...row, state: 'reauthorize' }; }
-      return Response.json(row);
-    }],
+test('unknown refresh result or a failed secret write never exposes a new access token', async () => {
+  const old = sealSession({ access_token: token(1), refresh_token: 'fixture', expires_at: 1 }, env);
+  const lost = router([
+    ...smRoutes({ latest: old }),
     [SUPA + '/auth/v1/token?grant_type=refresh_token', () => { throw Error('synthetic lost response'); }],
   ]);
-  await assert.rejects(createWorkflowIdentity({ env, fetcher }).getOwner(), /rotation was not confirmed/);
-  assert.equal(invalidated, true);
-  await assert.rejects(createWorkflowIdentity({ env, fetcher }).getOwner());
-  assert.equal(fetcher.find(SUPA + '/auth/v1/token').length, 1);
+  await assert.rejects(createWorkflowIdentity({ env, fetcher: lost }).getOwner(), /rotation was not confirmed/);
+  assert.equal(lost.find(SM_ADD).length, 0);
+
+  let wrote = false;
+  const writeFail = router([
+    ...smRoutes({ latest: old, addStatus: 503, onAdd() { wrote = true; } }),
+    [SUPA + '/auth/v1/token?grant_type=refresh_token', () => Response.json({ access_token: token(3600), refresh_token: 'new-fixture', user: { email_confirmed_at: 'synthetic-confirmation' } })],
+  ]);
+  await assert.rejects(createWorkflowIdentity({ env, fetcher: writeFail }).getOwner(), /rotation was not confirmed/);
+  assert.equal(wrote, true);
 });

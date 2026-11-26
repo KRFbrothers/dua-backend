@@ -66,7 +66,9 @@ while IFS= read -r line; do
     # These workflow controls are explicit, non-secret deployment inputs below.
     # Do not silently turn them into Secret Manager bindings if an operator happens
     # to create a secret with the same name.
-    case "$name" in PORT|DUA_REQUIRE_LOGIN|DUA_CHAT_DEADLINE_SECONDS|DUA_WORKFLOWS_ENABLED|DUA_WORKFLOW_EXTERNAL_TRIGGERS_ENABLED|DUA_WORKFLOW_OWNER_ID) continue ;; esac
+    # Never pin the rotating owner-session secret as a Cloud Run env binding; the
+    # runtime reads Secret Manager :latest through the API after an approved IAM grant.
+    case "$name" in PORT|DUA_REQUIRE_LOGIN|DUA_CHAT_DEADLINE_SECONDS|DUA_WORKFLOWS_ENABLED|DUA_WORKFLOW_EXTERNAL_TRIGGERS_ENABLED|DUA_WORKFLOW_OWNER_ID|DUA_WORKFLOW_OWNER_SESSION|DUA_WORKFLOW_OWNER_SESSION_SECRET) continue ;; esac
     # Remote kill switches are owned by `gcloud run services update --update-env-vars` (packages/contracts/KILL_SWITCHES.md).
     # The deployer never passes them, so they survive every deploy.
     if is_kill_switch "$name"; then continue; fi
@@ -149,15 +151,13 @@ gcloud builds submit "$web_dir" --project "$PROJECT_ID" --region "$region" \
 settings=("NODE_ENV=production" "DUA_REQUIRE_LOGIN=1" "DUA_CHAT_DEADLINE_SECONDS=${deadline}")
 
 # Workflow execution is opt-in. Omitted inputs preserve the current Cloud Run
-# values because the deployment uses --update-env-vars. Enabling it requires the
-# existing service-role secret to be available and pinned above.
+# values because the deployment uses --update-env-vars. Workflow RPCs use the
+# owner JWT (migration 202611260001). SUPABASE_SERVICE_ROLE_KEY remains for
+# quota, Imagine, live voice and account deletion, not for workflow tables.
+# Do not bind DUA_WORKFLOW_OWNER_SESSION as a pinned Cloud Run secret.
 if [[ -v DUA_WORKFLOWS_ENABLED ]]; then
   if [[ "$DUA_WORKFLOWS_ENABLED" != 0 && "$DUA_WORKFLOWS_ENABLED" != 1 ]]; then
     echo "DUA_WORKFLOWS_ENABLED must be 0 or 1." >&2
-    exit 1
-  fi
-  if [[ "$DUA_WORKFLOWS_ENABLED" == 1 && ! -v "attached_settings[SUPABASE_SERVICE_ROLE_KEY]" ]]; then
-    echo "Workflow execution needs an enabled SUPABASE_SERVICE_ROLE_KEY secret version." >&2
     exit 1
   fi
   settings+=("DUA_WORKFLOWS_ENABLED=${DUA_WORKFLOWS_ENABLED}")

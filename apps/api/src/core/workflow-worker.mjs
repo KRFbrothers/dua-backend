@@ -69,10 +69,11 @@ export async function readAgentOutput(body, signal) {
 
 export async function runWorkerOnce({ env = process.env, fetcher = fetch, signal = new AbortController().signal, getOwner = createWorkflowIdentity({ env, fetcher }).getOwner } = {}) {
   requireEnabled(env);
-  const owner = await getOwner(env, fetcher, signal);
-  if (env.DUA_WORKFLOW_AUTOMATION_ENABLED === '1') await executionDb('rpc/dua_workflow_tick', { env, fetcher, signal, body: { p_owner: owner.user.id } });
+  let owner = await getOwner(env, fetcher, signal);
+  const db = (path, extra = {}) => executionDb(path, { env, fetcher, signal, token: owner.token, ...extra });
+  if (env.DUA_WORKFLOW_AUTOMATION_ENABLED === '1') await db('rpc/dua_workflow_tick', { body: { p_owner: owner.user.id } });
   const worker = randomUUID();
-  const rows = await executionDb('rpc/dua_workflow_claim', { env, fetcher, signal, body: { p_worker: worker, p_owner: owner.user.id } });
+  const rows = await db('rpc/dua_workflow_claim', { body: { p_worker: worker, p_owner: owner.user.id } });
   if (!rows.length) return false;
   let run = rows[0], steps = structuredClone(run.steps);
   const call = new AbortController(), pulseStop = new AbortController();
@@ -82,7 +83,7 @@ export async function runWorkerOnce({ env = process.env, fetcher = fetch, signal
   let tail = Promise.resolve();
   const checkpoint = (status, error = null, saveSteps = true) => {
     const write = tail.then(async () => {
-      run = await executionDb('rpc/dua_workflow_checkpoint', { env, fetcher, single: true, body: {
+      run = await db('rpc/dua_workflow_checkpoint', { single: true, body: {
         p_owner: owner.user.id, p_id: run.id, p_worker: worker, p_steps: saveSteps ? steps : null, p_status: status, p_error: error,
       } });
       if (run.status === 'cancelled') { stopped = true; call.abort(); }
@@ -112,6 +113,7 @@ export async function runWorkerOnce({ env = process.env, fetcher = fetch, signal
       active = i;
       const credentials = await getOwner(env, fetcher, signal);
       if (credentials.user.id !== run.owner_id) throw new WorkflowError('Worker owner changed. Execution refused.', 403);
+      owner = credentials;
       requireEnabled(env);
       steps[i] = { ...steps[i], status: 'running', error: null };
       await checkpoint('running');

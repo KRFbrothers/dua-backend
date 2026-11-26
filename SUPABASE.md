@@ -143,6 +143,20 @@ Apply `supabase/migrations/202611250001_dua_orhan_tasks_lifecycle.sql` after `20
 
 **Deploy order:** apply this migration before deploying a `dua-api` that includes PR K2. That API selects the new columns, so without them every `/api/orhan/tasks` call fails with the "migration" setup error.
 
+## 1g. Workflow RPCs as the signed-in owner
+
+Apply `supabase/migrations/202611260001_workflow_rpcs_authenticated.sql` after the workflow execution, identity and automation migrations, using the [CLI workspace](#repository-paths-and-cli-workspace) workflow (`db push` only after explicit owner approval). It is safe to run again. It:
+
+- keeps the existing workflow tables and row-level security as they are (`authenticated` may `SELECT` its own executions and automation rows; `dua_workflow_credentials` and `dua_workflow_deliveries` stay locked);
+- replaces the workflow mutation RPCs (`enqueue`, `claim`, `control`, `checkpoint`, `recover`, `register`, `automation_disable`, `tick`, `deliver`) as `SECURITY DEFINER` functions with `search_path ''` and requires `auth.uid() = p_owner`;
+- grants `EXECUTE` on those RPCs and on `dua_workflow_history` to `authenticated` only (not `anon`, including `dua_workflow_deliver`);
+- leaves `dua_workflow_identity` and `dua_workflow_credentials` unchanged. The worker stores the sealed owner session in Secret Manager instead. That table and RPC are unused after this API is deployed and may be archived later; they are not dropped here.
+
+`dua-api` and the workflow worker call these RPCs only with the signed-in owner's access token and the anon key (see [API_CONTRACT.md](API_CONTRACT.md)). External webhook delivery still verifies the HMAC first, then uses a provisioned owner session. `SUPABASE_SERVICE_ROLE_KEY` remains for quota, Imagine, live-voice start, account deletion and the scheduled backup job, not for these workflow tables.
+
+**Deploy order:** apply this migration, then deploy `dua-api` (and update the VM worker) in the same window if workflow execution is enabled. After the migration, a service-role call has a null `auth.uid()` and is refused. Creating the Secret Manager session secret and granting `secretAccessor` plus `secretVersionAdder` on that one secret are separate, approved live steps; do not pin that secret as a Cloud Run env binding.
+
+
 ## 2. Configure the shared backend
 
 Add these as Secret Manager secrets (same names) and re-run `apps/api/deploy-cloudrun.sh`:

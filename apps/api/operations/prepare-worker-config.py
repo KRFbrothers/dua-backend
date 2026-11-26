@@ -17,6 +17,8 @@ ZONE = "us-central1-a"
 INSTANCE = "dua-workflow-worker"
 SUPABASE_HOST = "gmjzshgzdaizfximuhsf.supabase.co"
 KEY_SECRET = "DUA_WORKFLOW_CREDENTIAL_KEY"
+SESSION_SECRET = "DUA_WORKFLOW_OWNER_SESSION"
+RUNTIME_SA = "dua-api@{}.iam.gserviceaccount.com"
 
 
 class SetupError(Exception):
@@ -94,6 +96,35 @@ def ssh(command):
                   "--tunnel-through-iap", "--command=" + command, capture=False)
 
 
+def session_secret():
+    """Create a revoked placeholder if missing. Never overwrite an enabled version."""
+    existing = gcloud("secrets", "list", "--format=value(name)")
+    names = {name.rsplit("/", 1)[-1] for name in existing.splitlines()}
+    if SESSION_SECRET not in names:
+        gcloud("secrets", "create", SESSION_SECRET, "--replication-policy=automatic",
+               "--data-file=-", input_text='{"state":"reauthorize"}')
+    return SESSION_SECRET
+
+
+def grant_session_secret(secret_name, emails):
+    for email in emails:
+        if not email or not email.endswith(".iam.gserviceaccount.com"):
+            raise SetupError("Refusing to grant the owner session secret to an unexpected member")
+        member = "serviceAccount:" + email
+        for role in ("roles/secretmanager.secretAccessor", "roles/secretmanager.secretVersionAdder"):
+            gcloud("secrets", "add-iam-policy-binding", secret_name,
+                   "--member=" + member, "--role=" + role)
+
+
+def worker_service_account():
+    email = gcloud("compute", "instances", "describe", INSTANCE, "--zone=" + ZONE,
+                   "--format=value(serviceAccounts[0].email)")
+    if not email or "@" not in email:
+        raise SetupError("The workflow worker instance has no service account")
+    return email
+
+
+
 def main():
     if os.uname().nodename.split(".")[0] == INSTANCE:
         raise SetupError("Exit the worker SSH session and run this in Cloud Shell")
@@ -127,7 +158,11 @@ def main():
                     "DUA_MAINTENANCE_MESSAGE", "DUA_DISABLE_AGENT"):
             config[name] = setting(api, name)
 
-    config.update(DUA_WORKFLOW_OWNER_ID="", DUA_WORKFLOW_CREDENTIAL_KEY=encryption_key(),
+    key = encryption_key()
+    session = session_secret()
+    grant_session_secret(session, (worker_service_account(), RUNTIME_SA.format(PROJECT)))
+    config.update(DUA_WORKFLOW_OWNER_ID="", DUA_WORKFLOW_CREDENTIAL_KEY=key,
+                  DUA_WORKFLOW_OWNER_SESSION_SECRET=session, GOOGLE_CLOUD_PROJECT=PROJECT,
                   DUA_WORKFLOWS_ENABLED="0", DUA_WORKFLOW_AUTOMATION_ENABLED="0", DUA_REQUIRE_LOGIN="1")
     if any(not isinstance(value, str) or any(c in value for c in "\r\n\0") for value in config.values()):
         raise SetupError("A setting cannot be represented safely in the environment file")
@@ -147,7 +182,7 @@ def main():
         finally:
             ssh("rm -f -- " + pending)
     print("Worker config installed. Secret values were not printed.")
-    print("Encryption key backed up in Secret Manager. Owner session is not provisioned; worker remains stopped.")
+    print("Encryption key backed up in Secret Manager. Owner session secret uses :latest via the API and is not pinned into the env file or Cloud Run. Owner session is not provisioned; worker remains stopped.")
 
 
 if __name__ == "__main__":
