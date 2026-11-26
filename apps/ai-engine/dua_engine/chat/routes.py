@@ -47,7 +47,8 @@ def register_chat_routes(app):
         try:
             attachments = engine.decode_attachments(data.get("attachments"))
             contents = engine.build_contents(data.get("messages"), attachments)
-            system = engine.system_text(data)
+            # Custom skill bodies are read with the owner's own token (RLS); starter-only requests skip Supabase.
+            system = engine.system_text(data, engine.custom_skills_for(data, getattr(g, "owner_token", "")))
         except engine.BadRequest as error:
             return jsonify({"error": error.message}), error.status
 

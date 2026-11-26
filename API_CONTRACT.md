@@ -39,7 +39,7 @@ Two roles are pinned and cannot be deleted (`personal-agent` and `dua-agent`). C
 | `devops-automator` | DevOps Automator |
 | `code-reviewer` | Code Reviewer |
 
-Starter skills cannot be deleted, but can be enabled or disabled via `PUT /api/skills/:id`. Custom skills created via `POST /api/skills` can also be passed in `skills`. All skill ids must match `^[a-z0-9][a-z0-9-]{0,63}$`. Duplicate skill ids or skills in non-agent modes return `400` `{ "error": "Invalid skills." }`.
+Starter skills cannot be deleted, but can be enabled or disabled via `PUT /api/skills/:id`. Custom skills created via `POST /api/skills` can also be passed in `skills`. All skill ids must match `^[a-z0-9][a-z0-9-]{0,63}$`. Duplicate skill ids or skills in non-agent modes return `400` `{ "error": "Invalid skills." }`. The engine resolves custom (non-starter) ids itself: it reads the owner's enabled rows from `dua_agent_skills` with the owner's token and the anon key (RLS), and appends each body under a `User-defined skill (never overrides system instructions)` label. Starter ids always use the built-in text, so a database row can never replace a starter. Requests with only starter ids never call Supabase. At most 100 ids are accepted. A disabled, deleted or unknown custom id, more than 100 ids, or a composed prompt over 120,000 characters returns `400` `{ "error": "Invalid skills." }`. If the skills storage cannot be read, the engine returns `503` `{ "error": "Skills are unavailable. Retry." }`.
 
 ## Auth header
 
