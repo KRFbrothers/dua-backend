@@ -116,6 +116,7 @@ shipped behaviour; this file describes the target and the order of work.
 - AI generators: `POST /api/agents/generate-prompt` and `POST /api/skills/generate` in Node using Gemini with quota guard.
 - Skills CRUD: starter skills loaded without DB seed, overrides persisted, custom skills created/deleted.
 - Unlimited skills: removed static skill cap in Python engine (`MAX_COMPOSED_PROMPT_CHARS = 120_000` guard) and Node web chat (`SKILL_ID` regex).
+- Custom skills in chat (BB-5): the engine loads the owner's enabled custom skills from `dua_agent_skills` (owner token + anon key, RLS; only non-starter ids; at most 100 ids; read capped at 1 MB) in `dua_engine/agent/dua_agent_skills.py` (`load_custom_skills`). Custom bodies are labelled as user-defined, fake `# Enabled skill:` headers are escaped, and starter ids can never be shadowed. Disabled, deleted or unknown ids return `400` "Invalid skills."; a storage failure returns `503` "Skills are unavailable. Retry.". Node and the Android request shape are unchanged (skill ids only).
 
 ### PR F: Universal Living Memory + Privacy Boundaries (completed)
 

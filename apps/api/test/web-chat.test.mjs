@@ -56,6 +56,19 @@ test('web chat forwards Dua Agent skill ids and rejects anything else',async()=>
  assert.equal((await run(bad,mockFetch())).status,400);
 });
 
+test('web chat forwards custom skill ids unchanged (bodies are resolved by the engine, never sent by Node)',async()=>{
+ const skills=['code-reviewer','my-custom-skill'];
+ const fetcher=mockFetch(sseResponse([sse({type:'done'},'done')]));
+ const request=new Request(origin+'/api/web/chat',{method:'POST',headers:{'content-type':'application/json',origin,'sec-fetch-site':'same-origin',cookie:'dua_access=fake-access'},body:JSON.stringify({...body,skills})});
+ const response=await run(request,fetcher);
+ assert.equal(response.status,200);
+ await response.text();
+ assert.equal(fetcher.calls.length,1);
+ assert.deepEqual(fetcher.calls[0].body.skills,skills);
+ assert.equal(Object.hasOwn(fetcher.calls[0].body,'customSkills'),false);
+ assert.equal(JSON.stringify(fetcher.calls[0].body).includes('body'),false);
+});
+
 test('web chat passes engine errors without leaking details and validates input',async()=>{
  const fetcher=mockFetch(Response.json({error:'This Dua AI engine is private.',detail:'secret'},{status:401}));
  const response=await run(req(),fetcher);

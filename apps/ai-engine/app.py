@@ -398,7 +398,20 @@ def build_contents(messages, attachments):
 MAX_CLIENT_SYSTEM_CHARS = 20000
 
 
-def system_text(data):
+def custom_skills_for(data, token):
+    """Owner's custom skills for Agent mode (user token + anon key, RLS). Starter-only requests skip Supabase."""
+    if data.get("mode") != "agent" or "skills" not in data:
+        return None
+    from dua_engine.agent.dua_agent_skills import SkillSelectionError, SkillStorageError, load_custom_skills
+    try:
+        return load_custom_skills(token, data.get("skills"))
+    except SkillSelectionError:
+        raise BadRequest("Invalid skills.")
+    except SkillStorageError:
+        raise BadRequest("Skills are unavailable. Retry.", 503)
+
+
+def system_text(data, custom_skills=None):
     text = SYSTEM_PROMPT
     if "personality" in data:
         personality = data["personality"]
@@ -418,7 +431,7 @@ def system_text(data):
             raise BadRequest("skills are only valid for Agent mode.")
         from dua_engine.agent.dua_agent_skills import SkillSelectionError, compose_dua_agent_instruction
         try:
-            extra = compose_dua_agent_instruction(data.get("skills"))
+            extra = compose_dua_agent_instruction(data.get("skills"), custom_skills)
         except SkillSelectionError:
             raise BadRequest("Invalid skills.")
         if extra:
