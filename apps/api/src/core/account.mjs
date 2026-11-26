@@ -1,6 +1,7 @@
 import { ownsPath } from './file-types.mjs';
 import { validateCloudSnapshot } from './cloud-snapshot.mjs';
 import { requestOriginAllowed, allowedWebOrigins } from './cors.mjs';
+import { authRateLimiter } from './request-rate-limit.mjs';
 const cookieNames={access:'dua_access',refresh:'dua_refresh'};
 function configuration(env){
  const url=String(env.url||'').replace(/\/$/,'');const key=env.key;
@@ -24,7 +25,18 @@ export function accountCapabilities(env={}){
 }
 /** DUA_ALLOWED_EMAIL owner lock: '' (no lock), the normalized owner email, or null when the setting is malformed. */
 export function ownerEmail(value){const owner=String(value||'').trim().toLowerCase();if(!owner)return '';return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(owner)?owner:null;}
-function cookies(req){return Object.fromEntries((req.headers.get('cookie')||'').split(';').map(value=>value.trim().split('=' )).filter(pair=>pair.length===2));}
+/** Cookie values are everything after the first `=`, so padding in a token is kept. */
+export function readCookies(header){
+ const out={};
+ for(const part of String(header||'').split(';')){
+  const segment=part.trim();
+  const eq=segment.indexOf('=');
+  if(eq<=0)continue;
+  out[segment.slice(0,eq)]=segment.slice(eq+1);
+ }
+ return out;
+}
+function cookies(req){return readCookies(req.headers.get('cookie'));}
 // Greeting/profile name: the Google account name (full_name, then name) wins; an older saved display_name is the fallback.
 function metadataName(metadata){for(const key of ['full_name','name','display_name']){const value=metadata?.[key];if(typeof value==='string'&&value.trim())return value.trim().slice(0,80);}return '';}
 // Google profile photo (Supabase stores it as avatar_url / picture); https only.
@@ -44,7 +56,22 @@ export async function handleAccount(req,env={}){
  const firstParty=Boolean(origin)&&origin!==url.origin&&requestOriginAllowed(req,url,env);
  const web=firstParty;
  const native=req.headers.get('x-dua-native')==='1'&&!origin;let extraCookies=[];
- const json=(value,status=200)=>{const headers=new Headers({'Cache-Control':'no-store','Content-Type':'application/json'});extraCookies.forEach(value=>headers.append('Set-Cookie',value));return new Response(JSON.stringify(value),{status,headers});};
+ const json=(value,status=200,extra)=>{const headers=new Headers({'Cache-Control':'no-store','Content-Type':'application/json',...(extra||{})});extraCookies.forEach(value=>headers.append('Set-Cookie',value));return new Response(JSON.stringify(value),{status,headers});};
+ const limitAuth=(parsed)=>{
+  const configured=env.DUA_AUTH_MINUTE_LIMIT!==undefined&&env.DUA_AUTH_MINUTE_LIMIT!==null&&String(env.DUA_AUTH_MINUTE_LIMIT)!=='';
+  const enabled=configured||String(env.NODE_ENV||'').trim().toLowerCase()==='production'||Boolean(env.K_SERVICE);
+  if(!enabled)return null;
+  const text=String(env.DUA_AUTH_MINUTE_LIMIT??'10').trim();
+  if(!/^[1-9][0-9]*$/.test(text))return json({error:'Auth rate limit setup is invalid.'},503);
+  const limit=Number(text);
+  if(!Number.isSafeInteger(limit)||limit>100000)return json({error:'Auth rate limit setup is invalid.'},503);
+  const email=typeof parsed?.email==='string'?parsed.email.trim().toLowerCase().slice(0,254):'';
+  const hop=String(req.headers.get('x-forwarded-for')||'').split(',').map(part=>part.trim()).filter(Boolean).at(-1)||'';
+  const client=/^[0-9A-Za-z.:]{1,64}$/.test(hop)?hop:'unknown';
+  const burst=(env.authRateLimiter||authRateLimiter).consume(JSON.stringify(['auth',email,client]),limit);
+  if(!burst.allowed)return json({error:'Too many attempts. Wait before trying again.',retryAfter:burst.retryAfterSeconds},429,{'Retry-After':String(burst.retryAfterSeconds)});
+  return null;
+ };
  if(!requestOriginAllowed(req,url,env))return json({error:'Request origin is not allowed.'},403);
  if(!config)return url.pathname==='/api/account/session'?json({configured:false,user:null}):json({error:'Supabase account setup is not configured.'},503);
  const headers=token=>({'apikey':config.key,'Authorization':'Bearer '+(token||config.key),'Content-Type':'application/json'});
@@ -74,6 +101,7 @@ export async function handleAccount(req,env={}){
   let body;try{body=JSON.parse(raw||'{}');}catch{return json({error:'Invalid request.'},400);}if(!body||typeof body!=='object'||Array.isArray(body))return json({error:'Invalid request.'},400);
   if(['/api/account/reset-password','/api/auth/reset-password'].includes(url.pathname)){
    if(req.method!=='POST')return json({error:'Method not allowed.'},405);
+   const limited=limitAuth(body);if(limited)return limited;
    if(!owner)return json({error:'Configure the owner email before using password reset.'},503);
    const email=typeof body.email==='string'?body.email.trim().toLowerCase():'';
    if(!email||email.length>254||ownerEmail(email)!==email)return json({error:'Enter a valid email address.'},400);
@@ -107,6 +135,7 @@ export async function handleAccount(req,env={}){
    if(req.method!==(url.pathname==='/api/account/password'?'PUT':'POST'))return json({error:'Method not allowed.'},405);
   }
   if(['/api/account/email-login','/api/account/email-signup'].includes(url.pathname)&&req.method==='POST'){
+   const limited=limitAuth(body);if(limited)return limited;
    const email=typeof body.email==='string'?body.email.trim().toLowerCase():'';
    if(!email||email.length>254||ownerEmail(email)!==email)return json({error:'Enter a valid email address.'},400);
    if(email!==owner)return ownerDenied();
@@ -131,6 +160,7 @@ export async function handleAccount(req,env={}){
    return json(deliver(signedIn));
   }
   if(url.pathname==='/api/account/google-token'&&req.method==='POST'){
+   const limited=limitAuth(body);if(limited)return limited;
    if(!native&&!web)return json({error:'Native Google sign-in is only available from the Android app.'},400);
    if(typeof body.idToken!=='string'||! /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(body.idToken)||body.idToken.length>8192||body.nonce!==undefined&&(typeof body.nonce!=='string'||! /^[A-Za-z0-9_-]{16,128}$/.test(body.nonce)))return json({error:'Google sign-in could not be verified. Try again.'},400);
    const result=await request('/auth/v1/token?grant_type=id_token','POST',{provider:'google',id_token:body.idToken,...(body.nonce?{nonce:body.nonce}:{})});
@@ -142,7 +172,8 @@ export async function handleAccount(req,env={}){
   if(url.pathname==='/api/account/refresh'&&req.method==='POST'){
    // Native (Android) sends the refresh token in the body. A listed web origin is refreshed from its
    // HttpOnly cookie only: a refreshToken in the body is ignored, never trusted.
-   const refresh=native?body.refreshToken:stored[cookieNames.refresh];if(typeof refresh!=='string'||refresh.length>10000||! /^[A-Za-z0-9._-]+$/.test(refresh))return json({error:'Sign in again.'},401);
+   const limited=limitAuth(body);if(limited)return limited;
+   const refresh=native?body.refreshToken:stored[cookieNames.refresh];if(typeof refresh!=='string'||refresh.length>10000||! /^[A-Za-z0-9._=-]+$/.test(refresh))return json({error:'Sign in again.'},401);
    const result=await request('/auth/v1/token?grant_type=refresh_token','POST',{refresh_token:refresh});if(!result.response.ok)return json({error:'Session expired. Sign in again.'},401);if(!ownerAllowed(publicUser(validSession(result.data).user)))return ownerDenied();return json(deliver(result.data));
   }
   if(url.pathname==='/api/account/logout'&&req.method==='POST'){
@@ -166,6 +197,7 @@ export async function handleAccount(req,env={}){
    return json({phoneUpdated:true,ownerId:user.id,user:updated});
   }
   if(url.pathname==='/api/account/password'&&req.method==='PUT'){
+   const limited=limitAuth(body);if(limited)return limited;
    if(body.expectedAccountId!==user.id)return json({error:'Account changed. Review the current account before setting a password.'},409);
    if(typeof body.password!=='string'||!body.password.trim()||body.password.length<8||body.password.length>128)return json({error:'Use a password with 8\u2013128 characters.'},400);
    const setting=await request('/auth/v1/settings','GET');

@@ -1,6 +1,7 @@
 import { readJsonLimited } from './limited-json.mjs';
 import { killSwitches, maintenanceMessage, PAUSED } from './kill-switches.mjs';
 import { engineEndpoint, engineHeaders } from './engine-client.mjs';
+import { readCookies } from './account.mjs';
 
 const ID = /^[A-Za-z0-9_-]{16,64}$/;
 
@@ -33,7 +34,7 @@ export async function handleWebAgentAction(request, { env = process.env, fetcher
   const target = engineEndpoint(env, '/api/agent/action');
   if (!target) return json({ error: 'Agent engine is not configured.' }, 503);
   // Verify the browser cookie session, allowing the existing Auth handler to renew it.
-  let token = Object.fromEntries((request.headers.get('cookie') || '').split(';').map(p => p.trim().split('=')).filter(p => p.length === 2)).dua_access;
+  let token = readCookies(request.headers.get('cookie')).dua_access;
   try {
     const authenticate = sessionHandler || (await import('./account.mjs')).handleAccount;
     const sessionHeaders = new Headers(request.headers);
@@ -51,7 +52,7 @@ export async function handleWebAgentAction(request, { env = process.env, fetcher
     if (!details.configured) return json({ error: 'Account verification is unavailable.' }, 503);
     if (!details.user) return json({ error: 'Sign in to review this action.' }, 401);
     if (String(details.user.email).toLowerCase() !== owner) return json({ error: 'Only the owner can review actions.' }, 403);
-    if (!token || token.length > 10000 || !/^[A-Za-z0-9._-]+$/.test(token)) return json({ error: 'Sign in to review this action.' }, 401);
+    if (!token || token.length > 10000 || !/^[A-Za-z0-9._=-]+$/.test(token)) return json({ error: 'Sign in to review this action.' }, 401);
   } catch { return json({ error: 'Account verification is unavailable.' }, 503); }
   // No retries: the stored action may already have executed if its response is lost.
   const unknown = () => json({ code: 'ACTION_OUTCOME_UNKNOWN', error: 'The action result could not be confirmed. Check the destination before asking the agent again.' }, 502);

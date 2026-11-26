@@ -29,6 +29,15 @@ test('web chat enforces same-origin browser requests and POST',async()=>{
  assert.equal(fetcher.calls.length,0);
 });
 
+test('web chat keeps an access cookie whose value contains equals signs',async()=>{
+ const fetcher=mockFetch(sseResponse([sse({type:'done'},'done')]));
+ const request=new Request(origin+'/api/web/chat',{method:'POST',headers:{'content-type':'application/json',origin,'sec-fetch-site':'same-origin',cookie:'theme=a=b; dua_access=ab.cd=ef'},body:JSON.stringify(body)});
+ const response=await run(request,fetcher);
+ assert.equal(response.status,200);
+ await response.text();
+ assert.equal(fetcher.calls[0].init.headers.Authorization,'Bearer ab.cd=ef');
+});
+
 test('web chat forwards the owner bearer token and streams the engine SSE through',async()=>{
  const fetcher=mockFetch(sseResponse([sse({type:'text',delta:'Hel'},'text'),sse({type:'text',delta:'lo'},'text'),sse({type:'done'},'done')],{delayMs:5}));
  const response=await run(req(),fetcher,{DUA_APP_TOKEN:'fake-app-token'});

@@ -2,6 +2,7 @@
 import logging
 import os
 import sys
+import threading
 import types as pytypes
 
 import pytest
@@ -102,6 +103,42 @@ def test_adk_model_gets_key_client(monkeypatch, retry):
     api = model.api_client._api_client
     assert api.vertexai and api.api_key == KEY and api.project is None  # key client, not ADC
     assert (model.retry_options is not None) == (retry == "1")  # ADK_GEMINI_RETRY kept
+
+
+def _same_object_from_threads(call):
+    barrier = threading.Barrier(8)
+    found = []
+    lock = threading.Lock()
+
+    def work():
+        barrier.wait()
+        value = call()
+        with lock:
+            found.append(value)
+
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(found) == 8
+    assert all(item is found[0] for item in found)
+
+
+def test_get_model_cache_is_one_adapter_under_threads(monkeypatch):
+    monkeypatch.setattr(engine, "_models", {})
+    _same_object_from_threads(lambda: engine.get_model("shared-system"))
+    assert list(engine._models) == ["shared-system"]
+
+
+def test_key_client_is_created_once_under_threads(fake_genai):
+    fake_genai.setenv("GEMINI_AUTH", "apikey")
+    fake_genai.setenv("GOOGLE_API_KEY", KEY)
+    _same_object_from_threads(agent_models.key_client)
+
+
+def test_adc_client_is_created_once_under_threads(fake_genai):
+    _same_object_from_threads(engine.get_client)
 
 
 def test_adk_model_stays_adc_by_default(monkeypatch):

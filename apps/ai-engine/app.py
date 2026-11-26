@@ -104,6 +104,8 @@ SSE_HEADERS = {
 _client = None
 _adc_client = None
 _models = {}
+_CLIENT_LOCK = threading.Lock()
+_MODEL_LOCK = threading.Lock()
 
 
 class BadRequest(Exception):
@@ -118,11 +120,14 @@ def get_adc_client():
     if not agent_models.key_mode():
         return get_client()
     global _adc_client
-    if _adc_client is None:
-        if not PROJECT_ID:
-            raise RuntimeError("GOOGLE_CLOUD_PROJECT is not set")
-        from google import genai
-        _adc_client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
+    if _adc_client is not None:
+        return _adc_client
+    with _CLIENT_LOCK:
+        if _adc_client is None:
+            if not PROJECT_ID:
+                raise RuntimeError("GOOGLE_CLOUD_PROJECT is not set")
+            from google import genai
+            _adc_client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
     return _adc_client
 
 
@@ -133,14 +138,17 @@ def get_client():
     default "adc" (also the rollback) uses the service account for GOOGLE_CLOUD_PROJECT.
     """
     global _client
-    if _client is None:
-        if agent_models.key_mode():
-            _client = agent_models.key_client()
-            return _client
-        if not PROJECT_ID:
-            raise RuntimeError("GOOGLE_CLOUD_PROJECT is not set")
-        from google import genai
-        _client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
+    if _client is not None:
+        return _client
+    with _CLIENT_LOCK:
+        if _client is None:
+            if agent_models.key_mode():
+                _client = agent_models.key_client()
+            else:
+                if not PROJECT_ID:
+                    raise RuntimeError("GOOGLE_CLOUD_PROJECT is not set")
+                from google import genai
+                _client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
     return _client
 
 
@@ -248,13 +256,14 @@ def get_agent_model(system_text):
 
 
 def get_model(system_text=SYSTEM_PROMPT):
-    """Returns a cached model adapter for this system instruction."""
-    model = _models.get(system_text)
-    if model is None:
-        if len(_models) > 32:
-            _models.clear()
-        model = _models[system_text] = GenaiModel(system_text)
-    return model
+    """Returns one cached model adapter for this system instruction."""
+    with _MODEL_LOCK:
+        model = _models.get(system_text)
+        if model is None:
+            if len(_models) > 32:
+                _models.clear()
+            model = _models[system_text] = GenaiModel(system_text)
+        return model
 
 
 def get_chat_model(system_text, data):

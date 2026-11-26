@@ -44,11 +44,18 @@ test('server entry point honors container binding and serves unauthenticated con
       const response = await fetch(`http://127.0.0.1:${port}${route}`);
       assert.equal(response.status, 200);
       assert.equal(response.headers.get('cache-control'), 'no-store');
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+      assert.equal(response.headers.get('x-frame-options'), 'DENY');
+      assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+      assert.match(response.headers.get('content-security-policy'), /default-src 'none'/);
       const data = await response.json();
       assert.ok(data && typeof data === 'object');
       if (route === '/api/setup') assert.equal(data.account.requireLogin, true);
     }
-    assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 404);
+    const missing = await fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(missing.headers.get('x-frame-options'), 'DENY');
   } finally {
     child.kill('SIGTERM');
     await exited;

@@ -1,7 +1,7 @@
 import { handleWebAgentAction } from '../core/web-agent-action.mjs';
 import { handleChat } from '../core/providers.mjs';
 import { handleSearch } from '../core/search.mjs';
-import { handleAccount, handleCloudRead } from '../core/account.mjs';
+import { handleAccount, handleCloudRead, readCookies } from '../core/account.mjs';
 import { handleSetup } from '../core/setup.mjs';
 import { handleAdvanced } from '../core/advanced-integrations.mjs';
 import { guardChatAccess } from '../core/access-policy.mjs';
@@ -26,16 +26,32 @@ import { DEFAULT_ENGINE_URL, engineEndpoint, engineHeaders } from '../core/engin
 /** DUA_CHAT_DEADLINE_SECONDS: whole-request chat deadline (default 280 s, allowed 10\u2013790 s). */
 export const chatDeadlineMs = env => envInteger(env, 'DUA_CHAT_DEADLINE_SECONDS', 280, 10, 790) * 1000;
 
+export const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'X-Frame-Options': 'DENY',
+  'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+};
+
+export function applySecurityHeaders(response) {
+  if (!response?.headers) return response;
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+    if (!response.headers.has(name)) response.headers.set(name, value);
+  }
+  return response;
+}
+
 export async function handleService(request, options = {}) {
  const env = options.env || process.env;
  const url = new URL(request.url);
  const preflight = corsPreflight(request, url, env);
- if (preflight) return withRequestLog(request, async () => preflight, { logWriter: options.logWriter });
+ if (preflight) return withRequestLog(request, async () => applySecurityHeaders(preflight), { logWriter: options.logWriter });
  if (!requestOriginAllowed(request, url, env)) {
-  return withRequestLog(request, async () => Response.json({ error: 'Request origin is not allowed.' }, { status: 403, headers: { 'Cache-Control': 'no-store' } }), { logWriter: options.logWriter });
+  return withRequestLog(request, async () => applySecurityHeaders(Response.json({ error: 'Request origin is not allowed.' }, { status: 403, headers: { 'Cache-Control': 'no-store' } })), { logWriter: options.logWriter });
  }
  const response = await withRequestLog(request, () => routeService(request, options), { logWriter: options.logWriter });
- return applyCors(response, request);
+ return applySecurityHeaders(applyCors(response, request));
 }
 
 async function routeService(request,{env=process.env,fetcher=fetch}={}) {
@@ -114,9 +130,8 @@ export async function handleWebChat(request,{env=process.env,fetcher=fetch}={}){
  if(request.method!=='POST')return noStore('Method not allowed.',405);
  const url=new URL(request.url);
  if(request.headers.get('origin')!==url.origin||!['','same-origin'].includes(request.headers.get('sec-fetch-site')||''))return noStore('Request origin is not allowed.',403);
- const cookie=Object.fromEntries((request.headers.get('cookie')||'').split(';').map(v=>v.trim().split('=')).filter(p=>p.length===2));
- const token=cookie.dua_access;
- if(!token||token.length>10000||!/^[A-Za-z0-9._-]+$/.test(token))return noStore('Sign in to chat.',401);
+ const token=readCookies(request.headers.get('cookie')).dua_access;
+ if(!token||token.length>10000||!/^[A-Za-z0-9._=-]+$/.test(token))return noStore('Sign in to chat.',401);
  const target=engineUrl(env);
  if(!target)return noStore('Chat engine is not configured.',503);
  const tooLarge=()=>noStore('Conversation too large. Start a new chat.',413);
@@ -135,7 +150,7 @@ export async function handleWebChat(request,{env=process.env,fetcher=fetch}={}){
  if(!access.allowed)return access.response;
  // A refreshed session returns a new access cookie; forward that token, not the expired one.
  let bearer=token;
- for(const c of new Headers(access.headers||undefined).getSetCookie()){const m=/^dua_access=([^;]*)/.exec(c);if(m&&m[1].length<=10000&&/^[A-Za-z0-9._-]+$/.test(m[1]))bearer=m[1];}
+ for(const c of new Headers(access.headers||undefined).getSetCookie()){const m=/^dua_access=([^;]*)/.exec(c);if(m&&m[1].length<=10000&&/^[A-Za-z0-9._=-]+$/.test(m[1]))bearer=m[1];}
  // Plain chat or Agent only from the website; Build/persistence stay Android-only.
  const mode=data.mode==='agent'?'agent':data.mode==='reasoning'?'reasoning':'auto';
  const skills=duaAgentSkills(data,mode);

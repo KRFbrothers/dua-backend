@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import threading
 
 ROLES = {'controller', 'helper', 'merger'}
 PROVIDERS = ('openai/', 'anthropic/', 'ollama/', 'ollama_chat/', 'vllm/', 'openrouter/')
@@ -204,6 +205,7 @@ def check_adapters():
 # --- GEMINI_AUTH=apikey: Vertex AI express mode with GOOGLE_API_KEY (default "adc" is the rollback) ---
 _warned = []
 _key_client = None
+_KEY_CLIENT_LOCK = threading.Lock()
 
 
 def key_mode():
@@ -228,10 +230,13 @@ def key_client_kwargs():
 def key_client():
     """One shared google-genai client in express mode (API key, no project/location) for chat/helpers/search."""
     global _key_client
-    if _key_client is None:
-        from google import genai
-        _key_client = genai.Client(**key_client_kwargs())
-    return _key_client
+    if _key_client is not None:
+        return _key_client
+    with _KEY_CLIENT_LOCK:
+        if _key_client is None:
+            from google import genai
+            _key_client = genai.Client(**key_client_kwargs())
+        return _key_client
 
 
 def with_key(model):

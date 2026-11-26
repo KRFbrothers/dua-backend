@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleAccount } from '../src/core/account.mjs';
+import { RequestRateLimiter } from '../src/core/request-rate-limit.mjs';
 import { mockFetch } from './helpers.mjs';
 
 const id='11111111-1111-4111-8111-111111111111';
@@ -123,6 +124,18 @@ test('website email login keeps the owner lock, same-origin rule and Android-onl
  const fetcher=mockFetch(settings(),Response.json(session({user:user({email:'other@example.com'})})),new Response(null,{status:204}));
  const response=await handleAccount(req('email-login',credentials,'POST',web),env(fetcher));
  assert.equal(response.status,403);assert.equal(response.headers.getSetCookie().length,0);
+});
+test('email login stops after the auth attempt limit and does not call Supabase again',async()=>{
+ const authRateLimiter=new RequestRateLimiter({clock:()=>0});
+ const limited=fetcher=>handleAccount(req('email-login',credentials),{...env(fetcher),DUA_AUTH_MINUTE_LIMIT:'2',authRateLimiter});
+ assert.equal((await limited(mockFetch(settings(),Response.json(session())))).status,200);
+ assert.equal((await limited(mockFetch(settings(),Response.json(session())))).status,200);
+ const blocked=mockFetch(settings(),Response.json(session()));
+ const response=await limited(blocked);
+ assert.equal(response.status,429);
+ assert.equal(response.headers.get('retry-after'),'30');
+ assert.equal((await response.json()).error,'Too many attempts. Wait before trying again.');
+ assert.equal(blocked.calls.length,0);
 });
 test('website email login passes Supabase rate limits through as 429 without cookies',async()=>{
  const fetcher=mockFetch(settings(),Response.json({message:'rate limited'},{status:429}));

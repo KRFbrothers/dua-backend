@@ -1,7 +1,7 @@
 // Supabase Storage REST calls for the private `dua-files` bucket. Every call uses the owner's own
 // access token, so the bucket's row-level security policies (supabase/migrations/202610080001_dua_files_storage.sql)
 // decide access. No service-role key is needed or used here.
-import { handleAccount } from './account.mjs';
+import { handleAccount, readCookies } from './account.mjs';
 import { readJsonLimited } from './limited-json.mjs';
 import { envInteger } from './adapters.mjs';
 
@@ -31,9 +31,8 @@ function isServiceRoleJwt(key) {
 export function userToken(request) {
   const bearer = request.headers.get('authorization')?.match(/^Bearer ([A-Za-z0-9._-]{1,10000})$/)?.[1];
   if (bearer) return bearer;
-  const cookie = (request.headers.get('cookie') || '').split(';').map(v => v.trim()).find(v => v.startsWith('dua_access='));
-  const value = cookie?.slice('dua_access='.length);
-  return value && /^[A-Za-z0-9._-]{1,10000}$/.test(value) ? value : null;
+  const value = readCookies(request.headers.get('cookie')).dua_access;
+  return value && /^[A-Za-z0-9._=-]{1,10000}$/.test(value) ? value : null;
 }
 
 /**
