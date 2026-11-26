@@ -7,6 +7,9 @@ import { browserOriginAllowed } from './cors.mjs';
 // Deliberately limited to non-mutating tools. Write approval continuation is not
 // supported by this worker; never silently inherit the engine's unrestricted set.
 export const WORKFLOW_TOOLS = new Set(['google_search', 'fetch_url', 'list_files', 'read_file', 'search_code', 'list_issues', 'read_issue', 'search_issues', 'search_notes', 'check_pr_ci', 'inspect_pr_ci', 'search_documents']);
+// K6: agent trigger runs ask for these read tools; the worker keeps only those the engine offers.
+export const TRIGGER_TOOLS = Object.freeze(['fetch_url', 'google_search', 'search_documents', 'search_notes']);
+export const TRIGGER_WORKFLOW_PREFIX = 'agent-trigger:';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const reply = (body, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 const str = (v, max) => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
@@ -73,6 +76,34 @@ export function normalizeDefinition(data) {
   return { steps, trigger: trigger.type === 'once' ? { type: 'once', at: new Date(due).toISOString() } : trigger.type === 'event' ? { type: 'event', eventId: trigger.eventId } : { type: 'manual' } };
 }
 
+/**
+ * K6: the one-step definition for a PR H agent trigger. Built only on the server (the trigger row is
+ * read with the owner's token), so `source` never comes from a client body; normalizeDefinition drops it.
+ */
+export function agentTriggerDefinition(trigger, agentName) {
+  if (!trigger || typeof trigger.id !== 'string' || typeof trigger.agent_id !== 'string' || typeof trigger.prompt !== 'string' || !trigger.prompt.trim())
+    throw new WorkflowError('That trigger cannot be run.', 400);
+  const name = String(agentName || trigger.agent_id).slice(0, 100);
+  return {
+    workflowId: TRIGGER_WORKFLOW_PREFIX + trigger.id,
+    title: `Trigger: ${name}`.slice(0, 120),
+    definition: {
+      steps: [{ id: 'trigger', agentId: trigger.agent_id, agentName: name, prompt: trigger.prompt.slice(0, 10000), instructions: '', allowedTools: [...TRIGGER_TOOLS] }],
+      trigger: { type: 'manual' },
+      source: { type: 'agent_trigger', triggerId: trigger.id, triggerType: trigger.trigger_type || null, agentId: trigger.agent_id, conversationId: trigger.conversation_id || null },
+    },
+  };
+}
+
+/** Shared enqueue: the same fingerprint and RPC for client definitions, trigger runs and schedule ticks. */
+export async function enqueueExecution({ ownerId, workflowId, title, requestKey, definition }, opts) {
+  const fingerprint = createHash('sha256').update(JSON.stringify({ workflowId, title, definition })).digest('hex');
+  return executionDb('rpc/dua_workflow_enqueue', { ...opts, single: true, body: {
+    p_owner: ownerId, p_workflow: workflowId, p_title: title, p_key: requestKey,
+    p_fingerprint: fingerprint, p_definition: definition, p_due: definition.trigger.at || new Date().toISOString(),
+  } });
+}
+
 export function publicExecution(row) {
   return { id: row.id, workflowId: row.workflow_id, title: row.title, status: row.status, steps: row.steps,
     attempt: row.attempt, cancelRequested: row.cancel_requested, createdAt: row.created_at, updatedAt: row.updated_at,
@@ -110,15 +141,12 @@ export async function handleWorkflowExecution(request, { env = process.env, fetc
     if (suffix !== '') return reply({ error: 'Not found.' }, 404);
     requireEnabled(env);
     const data = await readJsonLimited(request, 128 * 1024);
+    // normalizeDefinition rebuilds the definition, so a client-sent `source` (trigger runs only) is dropped.
     const definition = normalizeDefinition(data);
-    const fingerprint = createHash('sha256').update(JSON.stringify({ workflowId: data.workflowId, title: data.title, definition })).digest('hex');
     const requestKey = definition.trigger.type === 'event'
       ? 'event-' + createHash('sha256').update(JSON.stringify([data.workflowId, definition.trigger.eventId])).digest('hex')
       : data.requestKey;
-    const row = await executionDb('rpc/dua_workflow_enqueue', { ...opts, single: true, body: {
-      p_owner: owner.user.id, p_workflow: data.workflowId, p_title: data.title, p_key: requestKey,
-      p_fingerprint: fingerprint, p_definition: definition, p_due: definition.trigger.at || new Date().toISOString(),
-    } });
+    const row = await enqueueExecution({ ownerId: owner.user.id, workflowId: data.workflowId, title: data.title, requestKey, definition }, opts);
     return reply({ run: publicExecution(row) }, 202);
   } catch (e) {
     if (e instanceof SyntaxError) return reply({ error: 'Invalid workflow JSON.' }, 400);

@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { resolveOwner, StorageError } from './storage.mjs';
 import { readJsonLimited } from './limited-json.mjs';
-import { executionDb, normalizeDefinition, requireEnabled, WorkflowError } from './workflow-execution.mjs';
+import { agentTriggerDefinition, enqueueExecution, executionConfig, executionDb, normalizeDefinition, requireEnabled, WorkflowError } from './workflow-execution.mjs';
 import { createWorkflowIdentity } from './workflow-identity.mjs';
 import { browserOriginAllowed } from './cors.mjs';
 
@@ -93,4 +93,111 @@ export async function handleWorkflowAutomation(request, { env = process.env, fet
     if (e instanceof SyntaxError) return reply({ error: 'Invalid automation JSON.' }, 400);
     return reply({ error: e instanceof WorkflowError || e instanceof StorageError ? e.message : 'Workflow automation is unavailable. Check authentication and configuration.' }, e.status || 503);
   }
+}
+
+// ---------------------------------------------------------------------------
+// K6: PR H schedule triggers (dua_agent_triggers.trigger_type = 'schedule').
+// cron_expr is a 5-field cron (minute hour day-of-month month day-of-week), always read in
+// Asia/Kolkata (IST, UTC+05:30, no DST). Supported: *, numbers, lists (a,b), ranges (a-b),
+// steps (*/n, a-b/n); day-of-week 0-7 (0 and 7 = Sunday). Names (MON, JAN) and macros are not
+// supported: such triggers are skipped and logged by the worker, the API still accepts them.
+// ---------------------------------------------------------------------------
+const IST_OFFSET_MS = 330 * 60 * 1000;
+const CRON_FIELDS = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+const CRON_LOOKBACK_DAYS = 366;
+
+function cronField(text, [min, max]) {
+  const values = new Set();
+  for (const part of text.split(',')) {
+    const m = /^(\*|(\d+)(?:-(\d+))?)(?:\/(\d+))?$/.exec(part);
+    if (!m) return null;
+    let lo = min, hi = max;
+    if (m[1] !== '*') { lo = Number(m[2]); hi = m[3] === undefined ? (m[4] ? max : lo) : Number(m[3]); }
+    const step = m[4] === undefined ? 1 : Number(m[4]);
+    if (lo < min || hi > max || lo > hi || step < 1) return null;
+    for (let v = lo; v <= hi; v += step) values.add(v);
+  }
+  return values;
+}
+
+/** Parses a 5-field IST cron expression; returns null when it is not supported. */
+export function parseCron(expr) {
+  if (typeof expr !== 'string' || expr.length > 120) return null;
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const fields = parts.map((part, i) => cronField(part, CRON_FIELDS[i]));
+  if (fields.some(f => !f || !f.size)) return null;
+  const [minutes, hours, dom, months, dowRaw] = fields;
+  const dow = new Set([...dowRaw].map(d => d % 7));
+  return { minutes, hours, dom, months, dow, domAny: parts[2] === '*', dowAny: parts[4] === '*' };
+}
+
+function cronDayMatches(cron, date) {
+  if (!cron.months.has(date.getUTCMonth() + 1)) return false;
+  const domOk = cron.dom.has(date.getUTCDate()), dowOk = cron.dow.has(date.getUTCDay());
+  // Standard cron: when both day fields are restricted, either one may match.
+  if (cron.domAny || cron.dowAny) return (cron.domAny || domOk) && (cron.dowAny || dowOk);
+  return domOk || dowOk;
+}
+
+/** Latest IST cron slot at or before `now` (UTC Date), or null if none in the last year. */
+export function latestCronSlot(cron, now = new Date()) {
+  const local = new Date(Math.floor((now.getTime() + IST_OFFSET_MS) / 60000) * 60000);
+  const hours = [...cron.hours].sort((a, b) => b - a), minutes = [...cron.minutes].sort((a, b) => b - a);
+  for (let day = 0; day <= CRON_LOOKBACK_DAYS; day++) {
+    const date = new Date(Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() - day));
+    if (!cronDayMatches(cron, date)) continue;
+    for (const h of hours) {
+      if (day === 0 && h > local.getUTCHours()) continue;
+      for (const m of minutes) {
+        if (day === 0 && h === local.getUTCHours() && m > local.getUTCMinutes()) continue;
+        return new Date(date.getTime() + (h * 60 + m) * 60000 - IST_OFFSET_MS);
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Worker tick (only with DUA_WORKFLOW_AUTOMATION_ENABLED=1): for each enabled schedule trigger of the
+ * owner, queue only the latest due IST slot that is newer than last_run_at (or created_at). Request key
+ * trg:<id>:<slotEpoch> makes redelivery idempotent; an already active run for the trigger is skipped.
+ */
+export async function tickAgentTriggers({ owner, env, fetcher = fetch, signal, now = new Date(), log = () => {} }) {
+  const { base, key } = executionConfig(env);
+  const ownerId = encodeURIComponent(owner.user.id);
+  const headers = { apikey: key, Authorization: `Bearer ${owner.token}`, 'Content-Type': 'application/json' };
+  const sig = () => AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(15000)]);
+  const list = await fetcher(`${base}/rest/v1/dua_agent_triggers?select=id,agent_id,conversation_id,trigger_type,cron_expr,prompt,last_run_at,created_at&owner_id=eq.${ownerId}&trigger_type=eq.schedule&enabled=is.true&order=created_at.asc&limit=100`,
+    { headers, redirect: 'error', signal: sig() });
+  if (!list.ok) throw new WorkflowError('Agent triggers are unavailable.');
+  const triggers = await list.json();
+  let agents = null;
+  let queued = 0;
+  for (const trigger of Array.isArray(triggers) ? triggers : []) {
+    const cron = parseCron(trigger.cron_expr);
+    if (!cron) { log('trigger_cron_invalid', { triggerId: trigger.id }); continue; }
+    const slot = latestCronSlot(cron, now);
+    const since = Date.parse(trigger.last_run_at || trigger.created_at || '');
+    if (!slot || (Number.isFinite(since) && slot.getTime() <= since)) continue;
+    if (agents === null) {
+      const res = await fetcher(`${base}/rest/v1/dua_agents?select=id,name&owner_id=eq.${ownerId}&limit=200`, { headers, redirect: 'error', signal: sig() });
+      agents = new Map((res.ok ? await res.json() : []).map(a => [a.id, a.name]));
+    }
+    const slotEpoch = Math.floor(slot.getTime() / 1000);
+    try {
+      const job = agentTriggerDefinition(trigger, agents.get(trigger.agent_id) || trigger.agent_id);
+      await enqueueExecution({ ownerId: owner.user.id, requestKey: `trg:${trigger.id}:${slotEpoch}`, ...job }, { env, fetcher, signal, token: owner.token });
+      queued++;
+    } catch (e) {
+      log(e?.status === 409 ? 'trigger_run_active' : 'trigger_enqueue_failed', { triggerId: trigger.id });
+      if (e?.status !== 409) continue;
+    }
+    // Mark the slot as handled (also when a run was still active) so it is not retried every tick.
+    await fetcher(`${base}/rest/v1/dua_agent_triggers?id=eq.${encodeURIComponent(trigger.id)}&owner_id=eq.${ownerId}`, {
+      method: 'PATCH', headers: { ...headers, Prefer: 'return=minimal' }, redirect: 'error', signal: sig(),
+      body: JSON.stringify({ last_run_at: slot.toISOString() }),
+    }).catch(() => log('trigger_mark_failed', { triggerId: trigger.id }));
+  }
+  return queued;
 }

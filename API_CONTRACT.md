@@ -339,7 +339,7 @@ Owner-only proactive execution triggers (`dua_agent_triggers`). `:id` is the age
 | `GET /api/agents/:id/triggers/:triggerId` | none | `{ "trigger": trigger }`, `404` when not found |
 | `PUT /api/agents/:id/triggers/:triggerId` | `{ "triggerType"?: "", "cronExpr"?: "", "prompt"?: "", "conversationId"?: null, "enabled"?: false }` | `{ "trigger": trigger }`, `404` when not found |
 | `DELETE /api/agents/:id/triggers/:triggerId` | none | `204`, `404` when not found |
-| `POST /api/agents/:id/triggers/:triggerId/run` | none | `{ "triggered": true, "trigger": trigger }`. Updates `lastRunAt` timestamp |
+| `POST /api/agents/:id/triggers/:triggerId/run` | none | `{ "triggered": true, "trigger": trigger, "push": { "dispatched": false, "reason": "queued", "count": 0 }, "runId": "uuid", "status": "queued" }`. Queues a real agent run and updates `lastRunAt`. `503` when `DUA_WORKFLOWS_ENABLED` is off, `409` while a run for this trigger is still active, `404` when not found |
 
 ```json
 {
@@ -356,6 +356,13 @@ Owner-only proactive execution triggers (`dua_agent_triggers`). `:id` is the age
   }
 }
 ```
+
+**Trigger runs (K6).** `/run` does not call the model or send a push in the request. It queues a one-step workflow execution (`workflowId` `agent-trigger:<triggerId>`) for the single server workflow worker, so the run shows in `GET /api/workflow-executions` with `runId`. The `push` field is kept for older clients and is always the `queued` value above. The worker runs the agent with its own persona (`dua_agents.system_prompt`) and only read tools (`google_search`, `fetch_url`, `search_notes`, `search_documents`, limited to what the engine offers). When the run finishes:
+
+- **success:** if the trigger has a `conversationId`, the reply is saved there as an assistant message; a `dua_notifications` row (`title` "<agent> finished", `data` `{ triggerId, triggerType, runId, status, conversationId? }`) is written and the push is sent;
+- **failure:** a failure notification ("<agent> trigger failed") is written and pushed. Cancelled runs send nothing.
+
+**Schedules (K6).** `cronExpr` on `schedule` triggers is a 5-field cron (minute hour day-of-month month day-of-week) read in **Asia/Kolkata (IST, UTC+05:30)**. Supported: `*`, numbers, lists, ranges and steps; day-of-week `0`-`7` (`0`/`7` = Sunday). The worker queues only the latest due slot (missed older slots are not replayed) and only when `DUA_WORKFLOW_AUTOMATION_ENABLED=1`. The API still accepts any `cronExpr`; an expression the worker cannot read (names like `MON`, `@daily`) is skipped and logged by the worker. `webhook` and `missed_summary` triggers run only through manual `/run`.
 
 ### Devices and Push Notifications (Phase 5B)
 
@@ -498,7 +505,7 @@ Control-plane actions map onto existing routes:
 | `POST /api/workflow-automation/triggers/:id/disable` | `{ "expectedRevision": 0 }` | `{ "registration": {} }` |
 | `POST /api/workflow-automation/deliver/:id` | signed webhook body | delivery result JSON |
 
-`DUA_WORKFLOWS_ENABLED=1` is required to enqueue or register. External deliver also needs `DUA_WORKFLOW_EXTERNAL_TRIGGERS_ENABLED=1`. Authenticated workflow routes use the signed-in owner token with the anon key; a signed webhook still sends only `{ "eventId" }` after HMAC verification, and the server then uses the provisioned owner session. Response shapes are unchanged.
+`DUA_WORKFLOWS_ENABLED=1` is required to enqueue or register. Agent trigger runs (see Agent Triggers) also appear in the execution routes with `workflowId` `agent-trigger:<triggerId>`; their trigger source is set only by the server and is ignored in a `POST /api/workflow-executions` body. External deliver also needs `DUA_WORKFLOW_EXTERNAL_TRIGGERS_ENABLED=1`. Authenticated workflow routes use the signed-in owner token with the anon key; a signed webhook still sends only `{ "eventId" }` after HMAC verification, and the server then uses the provisioned owner session. Response shapes are unchanged.
 
 ### Same-origin cookie proxies
 
