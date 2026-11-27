@@ -158,6 +158,19 @@ Apply `supabase/migrations/202611260001_workflow_rpcs_authenticated.sql` after t
 
 **Deploy order:** apply this migration, then deploy `dua-api` (and update the VM worker) in the same window if workflow execution is enabled. After the migration, a service-role call has a null `auth.uid()` and is refused. Creating the Secret Manager session secret and granting `secretAccessor` plus `secretVersionAdder` on that one secret are separate, approved live steps; do not pin that secret as a Cloud Run env binding.
 
+## 1h. Function definition history (`dua_function_history`)
+
+Apply `supabase/migrations/202611280001_dua_function_history.sql` after `202611260001_workflow_rpcs_authenticated.sql`, using the [CLI workspace](#repository-paths-and-cli-workspace) workflow (`db push` only after explicit owner approval). It is safe to run again. It:
+
+- creates `public.dua_function_history`, one row per captured function version (`schema_name`, `function_name`, `identity_args`, `definition`, `captured_at`, `captured_by`), with RLS on and no grant to `anon` or `authenticated`; only `service_role` reads or writes it;
+- adds `public.dua_capture_function(p_name, p_args, p_captured_by)`, which copies `pg_get_functiondef` for `public.<p_name>(<p_args>)` into the table and raises `function_not_found` when the name and type list match nothing, so a typo fails loudly instead of recording nothing;
+- captures the current body of the eleven workflow functions that files 10 and 23 replaced in place, so the next change to any of them has a restore point that predates it;
+- adds two indexes: newest version of one function, and capture time.
+
+`p_args` is the type list only, for example `uuid, uuid`, because the helper matches on `oidvectortypes(proargtypes)`. A rollback re-applies the newest captured `definition` for that function. The table is inert until a migration calls the helper, so it cannot affect a running workflow.
+
+Rollback: `202611280001_dua_function_history.rollback.sql` beside it drops the helper, the indexes and the table. It deletes every captured definition, so export the table first if a body is still needed.
+
 
 ## 2. Configure the shared backend
 

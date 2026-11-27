@@ -12,6 +12,8 @@ export const DEFAULT_TABLES = Object.freeze([
   'dua_device_tokens', 'dua_notifications',
   // Phase 3: append-only task event log and the worker registry.
   'dua_task_events', 'dua_workers',
+  // Function definition history: infrastructure only, service_role access.
+  'dua_function_history',
 ]);
 const fail = reason => ({ ok: false, reason });
 function configuration(env) {

@@ -3,7 +3,8 @@
 Inventory of every file in `supabase/migrations/` and whether it can be rolled back.
 
 `AGENTS.md` 4.11 and `CONTRIBUTING.md` section 5 both require a rollback file beside every
-migration. `AGENTS.md` 4.11 also records the current fact: 25 migrations exist, none has one.
+migration. `AGENTS.md` 4.11 also records the current fact: 26 migrations exist, one has a
+rollback file (`202611280001_dua_function_history.rollback.sql`).
 This file is the record of that gap, one row per migration, so the next schema change can be
 judged against a known baseline instead of a guess.
 
@@ -11,12 +12,13 @@ judged against a known baseline instead of a guess.
 
 | Metric | Count |
 | --- | --- |
-| Total migrations | 25 |
-| Rollback possible (YES) | 19 |
+| Total migrations | 26 |
+| Rollback possible (YES) | 20 |
 | Rollback not possible (NO) | 6 |
 | Unknown | 0 |
+| Rollback file present | 1 |
 
-Read the counts as: 19 files can be undone with a written down script, 6 cannot be undone
+Read the counts as: 20 files can be undone with a written down script, 6 cannot be undone
 without losing data or without re-applying an earlier migration's function bodies. None is
 unknown, because every file was read in full.
 
@@ -70,6 +72,7 @@ repo reads it yet, so adding one is a separate decision.
 | 23 | `202611260001_workflow_rpcs_authenticated.sql` | Replaces ten workflow RPCs with `security definer` versions that require `auth.uid() = p_owner`, and moves execute grants to `authenticated` | NO | Would need the previous bodies re-applied from files 9, 10 and 11, plus the old grants | The file rewrites ten functions across three earlier migrations. A drop leaves the workflow with no RPCs, and the API already calls the owner-scoped shape. Reverting also reopens the service-role-only access the file closed. |
 | 24 | `202611260002_dua_messages_preview_guard.sql` | Replaces the preview trigger function and narrows the `dua_messages` insert grant to named columns | YES | Re-apply the trigger function body from file 16, then `revoke insert` and `grant insert on public.dua_messages to authenticated` | No data loss. Reverting lets a client set `created_at` and `id` again, which is the bug the file fixes, so only revert with the matching code. |
 | 25 | `202611270001_dua_task_lifecycle_workers.sql` | Adds five columns and four constraints to `dua_orhan_tasks`, creates `dua_task_events` and `dua_workers`, adds six functions and an append-only trigger | NO | Would need `drop column` on five columns plus dropping two tables and six functions | Dropping the columns destroys parent and root task links, the attempt counter and the idempotency key, so retry and continue history is lost. `dua_task_events` is the audit trail and cannot be rebuilt. |
+| 26 | `202611280001_dua_function_history.sql` | Creates `dua_function_history`, the `dua_capture_function` helper and two indexes, and captures the current body of eleven workflow functions | YES | `202611280001_dua_function_history.rollback.sql` beside it: drop the helper, the two indexes, then the table | Data loss: every captured function definition is deleted, so a function replaced after this migration loses its restore point. Export the table first if a body is still needed. The table is inert until a migration calls the helper, so the rollback cannot break a running workflow. |
 
 ## The six that cannot be rolled back
 
