@@ -1,19 +1,41 @@
-"""Tests for the engine liveness and readiness endpoints (Phase 3 items 8.1, 8.2)."""
+"""Tests for the engine liveness and readiness endpoints (Phase 3 items 8.1, 8.2).
+
+These run in the CI job that installs Flask and pytest only, so the module under test
+must not import a third-party HTTP client. The Supabase check is exercised by patching
+the module's opener, not `requests`.
+"""
 import os
 import sys
 import types
 import unittest
+import urllib.error
+from pathlib import Path
 from unittest import mock
 
 from flask import Flask
 
-from dua_engine import health as health_module
+# Same convention as the other engine tests: put apps/ai-engine on the path so
+# `dua_engine` resolves without a conftest.py (there is none in this repo).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from dua_engine import health as health_module  # noqa: E402
 
 
 def make_app():
     app = Flask(__name__)
     app.register_blueprint(health_module.health)
     return app
+
+
+class _FakeResponse:
+    def __init__(self, status=200):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
 
 class HealthTest(unittest.TestCase):
@@ -58,10 +80,20 @@ class HealthTest(unittest.TestCase):
 
     def test_supabase_check_reports_unreachable_without_leaking_the_error(self):
         with mock.patch.dict(os.environ, {"SUPABASE_URL": "https://proj.supabase.co", "SUPABASE_ANON_KEY": "sb_publishable_x"}, clear=True), \
-             mock.patch.object(health_module.requests, "get", side_effect=health_module.requests.RequestException("secret host detail")):
+             mock.patch.object(health_module._OPENER, "open", side_effect=urllib.error.URLError("secret host detail")):
             result = health_module._check_supabase()
         self.assertEqual(result, {"ok": False, "reason": "unreachable"})
         self.assertNotIn("secret", str(result))
+
+    def test_supabase_check_reports_a_non_2xx_status(self):
+        with mock.patch.dict(os.environ, {"SUPABASE_URL": "https://proj.supabase.co", "SUPABASE_ANON_KEY": "k"}, clear=True), \
+             mock.patch.object(health_module._OPENER, "open", side_effect=urllib.error.HTTPError("u", 401, "no", {}, None)):
+            self.assertEqual(health_module._check_supabase(), {"ok": False, "reason": "status_401"})
+
+    def test_supabase_check_passes_on_2xx(self):
+        with mock.patch.dict(os.environ, {"SUPABASE_URL": "https://proj.supabase.co", "SUPABASE_ANON_KEY": "k"}, clear=True), \
+             mock.patch.object(health_module._OPENER, "open", return_value=_FakeResponse(200)):
+            self.assertEqual(health_module._check_supabase(), {"ok": True})
 
     def test_supabase_check_rejects_a_non_https_url(self):
         with mock.patch.dict(os.environ, {"SUPABASE_URL": "http://insecure.test", "SUPABASE_ANON_KEY": "k"}, clear=True):
