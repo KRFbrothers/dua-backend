@@ -18,7 +18,8 @@ import { handleArtifactsMemories } from '../core/artifacts-memories.mjs';
 import { handleConversations } from '../core/conversations.mjs';
 import { handleAgentsSkills } from '../core/agents-skills.mjs';
 import { handleNotifications } from '../core/notifications.mjs';
-import { withRequestLog } from '../core/request-logging.mjs';
+import { withRequestLog, withRequestId } from '../core/request-logging.mjs';
+import { handleHealth } from '../core/health.mjs';
 import { switchResponse, killSwitches, PAUSED } from '../core/kill-switches.mjs';
 import { applyCors, corsPreflight, requestOriginAllowed } from '../core/cors.mjs';
 import { DEFAULT_ENGINE_URL, engineEndpoint, engineHeaders } from '../core/engine-client.mjs';
@@ -45,12 +46,18 @@ export function applySecurityHeaders(response) {
 export async function handleService(request, options = {}) {
  const env = options.env || process.env;
  const url = new URL(request.url);
+ // Health and readiness are answered before CORS, origin and kill-switch checks: a load
+ // balancer probe has no Origin header and must not be refused by the browser policy.
+ const health = await handleHealth(request, { env, fetcher: options.fetcher || fetch, service: 'dua-api', version: env.DUA_BUILD_VERSION || '' });
+ if (health) return applySecurityHeaders(health);
  const preflight = corsPreflight(request, url, env);
  if (preflight) return withRequestLog(request, async () => applySecurityHeaders(preflight), { logWriter: options.logWriter });
  if (!requestOriginAllowed(request, url, env)) {
   return withRequestLog(request, async () => applySecurityHeaders(Response.json({ error: 'Request origin is not allowed.' }, { status: 403, headers: { 'Cache-Control': 'no-store' } })), { logWriter: options.logWriter });
  }
- const response = await withRequestLog(request, () => routeService(request, options), { logWriter: options.logWriter });
+ // Every other route gets a request id (item 8.4). The GitHub stage log keeps its own
+ // withRequestLog wrapper inside routeService, unchanged.
+ const response = await withRequestId(request, () => withRequestLog(request, () => routeService(request, options), { logWriter: options.logWriter }));
  return applySecurityHeaders(applyCors(response, request));
 }
 
@@ -115,7 +122,7 @@ const WEB_CHAT_MAX_BYTES=4*1024*1024;
 const WEB_CHAT_MAX_MESSAGES=200;
 // The website sends {role,text}; accept the engine's `content` too (string or parts array).
 const validTurn=m=>!!m&&typeof m==='object'&&!Array.isArray(m)&&typeof m.role==='string'&&m.role.length<=32&&(typeof m.text==='string'||typeof m.content==='string'||Array.isArray(m.content));
-// The engine reads only `text`; turn `content` (string or parts) into text and drop `content`.
+// The engine reads only `text`; turn `content` (string or parts array) into text and drop `content`.
 const normalizeTurn=({content,...m})=>typeof m.text==='string'?m:{...m,text:typeof content==='string'?content:content.filter(p=>p&&typeof p.text==='string').map(p=>p.text).join('')};
 const noStore=(error,status)=>Response.json({error},{status,headers:{'Cache-Control':'no-store'}});
 const SKILL_ID=/^[a-z0-9][a-z0-9-]{0,63}$/;
