@@ -9,7 +9,7 @@ if [[ ! "$PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]]; then
 fi
 deadline="${DUA_CHAT_DEADLINE_SECONDS:-780}"
 if [[ ! "$deadline" =~ ^[0-9]{2,3}$ ]] || (( 10#$deadline < 10 || 10#$deadline > 790 )); then
-  echo "DUA_CHAT_DEADLINE_SECONDS must be 10–790 (default 780; Cloud Run timeout is 900)." >&2
+  echo "DUA_CHAT_DEADLINE_SECONDS must be 10\u2013790 (default 780; Cloud Run timeout is 900)." >&2
   exit 1
 fi
 command -v gcloud >/dev/null || { echo "Install Google Cloud CLI or run this script in Cloud Shell." >&2; exit 1; }
@@ -194,8 +194,13 @@ deploy_args=(--update-env-vars="$(join_csv "${settings[@]}")" --update-secrets="
 (( ${#remove_env[@]} )) && deploy_args+=(--remove-env-vars="$(join_csv "${remove_env[@]}")")
 (( ${#remove_secrets[@]} )) && deploy_args+=(--remove-secrets="$(join_csv "${remove_secrets[@]}")")
 echo "Deploying dua-api in us-central1; application owner authentication remains required..."
+# Phase 3 items 8.1, 8.2: probe the real endpoints instead of Cloud Run's default TCP check.
+# Liveness never touches the network, so a slow Supabase cannot restart a healthy revision.
+# Readiness returns 503 when Supabase is unreachable, so traffic moves to a healthy one.
 gcloud run deploy "$service" --project "$PROJECT_ID" --region "$region" --image "$image" \
   --service-account "$runtime_account" --port=8080 --timeout=900s --min-instances=0 \
+  --startup-probe="httpGet.path=/healthz,httpGet.port=8080,initialDelaySeconds=5,timeoutSeconds=3,periodSeconds=5,failureThreshold=12" \
+  --liveness-probe="httpGet.path=/healthz,httpGet.port=8080,timeoutSeconds=3,periodSeconds=30,failureThreshold=3" \
   --allow-unauthenticated "${deploy_args[@]}" --quiet
 echo "dua-api URL:"
 gcloud run services describe "$service" --project "$PROJECT_ID" --region "$region" --format='value(status.url)'
