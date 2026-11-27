@@ -201,12 +201,15 @@ export function parseMigrationFunctions(rawSql) {
     found.push({ name: name.toLowerCase(), args, action });
   };
 
-  const createRe = /create\s+(?:or\s+replace\s+)?function\s+(?:public\.)?([a-z_][a-z0-9_]*)\s*\(/gi;
+  const createRe = /create\s+(or\s+replace\s+)?function\s+(?:public\.)?([a-z_][a-z0-9_]*)\s*\(/gi;
   for (const match of sql.matchAll(createRe)) {
     const openIndex = match.index + match[0].length - 1;
     const group = readParenGroup(sql, openIndex);
     if (group === null) continue;
-    push(match[1], parseArgList(group), 'replace');
+    // A plain `create function` cannot overwrite an existing function: Postgres
+    // raises 42723. So if the migration applied, that function did not exist
+    // before it, and the rollback drops it instead of restoring a body.
+    push(match[2], parseArgList(group), match[1] ? 'replace' : 'create');
   }
 
   const dropRe = /drop\s+function\s+(?:if\s+exists\s+)?(?:public\.)?([a-z_][a-z0-9_]*)\s*\(/gi;
@@ -238,11 +241,20 @@ export function planRollback({ functions, history = {}, live = {}, before = null
   const restores = [];
   const missing = [];
   const dropped = [];
+  const creates = [];
 
   for (const fn of functions) {
     const key = `${fn.name}(${fn.args})`;
     const rows = (history[key] ?? []).filter(row => !before || new Date(row.captured_at) < new Date(before));
     const liveDefinition = live[key] ?? null;
+
+    // A function this migration created from nothing. No history is expected, and
+    // the rollback removes it. Only when a body was recorded does it become a
+    // restore, which covers a `create function` that replaced a dropped name.
+    if (fn.action === 'create' && !rows.length) {
+      creates.push({ ...fn, key });
+      continue;
+    }
 
     if (liveDefinition === null) {
       // Gone from the database. The newest recorded body is the only candidate.
@@ -256,13 +268,13 @@ export function planRollback({ functions, history = {}, live = {}, before = null
     else missing.push({ ...fn, key, recorded: rows.length });
   }
 
-  return { restores, missing, dropped };
+  return { restores, missing, dropped, creates };
 }
 
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
-function header({ migrationName, generatedAt, restores, missing, dropped }) {
+function header({ migrationName, generatedAt, restores, missing, dropped, creates = [] }) {
   const lines = [
     `-- Rollback for ${migrationName}`,
     '--',
@@ -272,6 +284,7 @@ function header({ migrationName, generatedAt, restores, missing, dropped }) {
     '--',
     `-- Restores ${restores.length} function definition(s) to the body each one had`,
     '-- before that migration replaced it.',
+    `-- Drops ${creates.length} function(s) the migration created from nothing.`,
     '--',
     '-- Data loss: none. Function definitions are copied, never moved, and',
     '-- `create or replace` keeps the existing grants on each function.',
@@ -279,8 +292,12 @@ function header({ migrationName, generatedAt, restores, missing, dropped }) {
     '-- Apply with:',
     `--   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f ${migrationName.replace(/\.sql$/, '.rollback.sql')}`,
     '--',
-    '-- Safe to run again: every statement is `create or replace`.',
+    '-- Safe to run again: every statement is `create or replace` or `drop if exists`.',
   ];
+  if (creates.length) {
+    lines.push('--', '-- Dropped by this rollback, because the migration created them:');
+    for (const fn of creates) lines.push(`--   ${fn.key}`);
+  }
   if (missing.length) {
     lines.push('--', '-- WARNING: no previous body was recorded for:');
     for (const fn of missing) lines.push(`--   ${fn.key}`);
@@ -293,7 +310,7 @@ function header({ migrationName, generatedAt, restores, missing, dropped }) {
 }
 
 /** Render the rollback SQL. `restores` comes from `planRollback`. */
-export function buildRollbackSql({ migrationName, restores, missing = [], dropped = [], generatedAt = new Date().toISOString() }) {
+export function buildRollbackSql({ migrationName, restores, missing = [], dropped = [], creates = [], generatedAt = new Date().toISOString() }) {
   const blocks = restores.map(({ key, row, reason }) => {
     const body = String(row.definition).trim().replace(/;\s*$/, '');
     const note = reason === 'dropped'
@@ -307,12 +324,20 @@ export function buildRollbackSql({ migrationName, restores, missing = [], droppe
     ].join('\n');
   });
 
+  // A function the migration created did not exist before it, so undoing the
+  // migration means removing it. `if exists` keeps the file safe to run twice.
+  const dropBlocks = creates.map(({ key }) => [
+    `-- public.${key}`,
+    '-- created by the migration, so the rollback removes it',
+    `drop function if exists public.${key};`,
+  ].join('\n'));
+
   return [
-    header({ migrationName, generatedAt, restores, missing, dropped }),
+    header({ migrationName, generatedAt, restores, missing, dropped, creates }),
     '',
     'begin;',
     '',
-    blocks.join('\n\n'),
+    [...blocks, ...dropBlocks].join('\n\n'),
     '',
     'commit;',
     '',

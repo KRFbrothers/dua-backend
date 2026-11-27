@@ -50,7 +50,9 @@ test('parseMigrationFunctions reads create or replace and drop', () => {
   const found = parseMigrationFunctions(sql);
   assert.deepEqual(found, [
     { name: 'dua_workflow_claim', args: 'uuid, uuid', action: 'replace' },
-    { name: 'dua_workflow_tick', args: 'uuid', action: 'replace' },
+    // A plain `create function` cannot overwrite an existing one, so it is a new
+    // function and the rollback drops it. See the dedicated test below.
+    { name: 'dua_workflow_tick', args: 'uuid', action: 'create' },
     { name: 'dua_old_thing', args: 'uuid, text', action: 'drop' },
   ]);
 });
@@ -155,6 +157,48 @@ test('buildRollbackSql wraps the bodies in one transaction', () => {
   assert.match(sql, /create or replace function public\.f\(p_a uuid\)/);
   // The trailing semicolon of the stored body must not double up.
   assert.doesNotMatch(sql, /;\s*;;/);
+});
+
+test('parseMigrationFunctions marks a plain create as create, not replace', () => {
+  const sql = `
+    create function public.dua_new_thing(p_a uuid) returns void language sql as $$ select; $$;
+    create or replace function public.dua_old_thing(p_a uuid) returns void language sql as $$ select; $$;
+  `;
+  assert.deepEqual(parseMigrationFunctions(sql), [
+    { name: 'dua_new_thing', args: 'uuid', action: 'create' },
+    { name: 'dua_old_thing', args: 'uuid', action: 'replace' },
+  ]);
+});
+
+test('planRollback drops a function the migration created from nothing', () => {
+  const functions = [{ name: 'f', args: 'uuid', action: 'create' }];
+  const plan = planRollback({ functions, history: {}, live: { 'f(uuid)': 'LIVE' } });
+  assert.equal(plan.restores.length, 0);
+  assert.equal(plan.missing.length, 0);
+  assert.equal(plan.creates.length, 1);
+  assert.equal(plan.creates[0].key, 'f(uuid)');
+});
+
+test('planRollback restores a create that had a recorded body', () => {
+  const functions = [{ name: 'f', args: 'uuid', action: 'create' }];
+  const history = { 'f(uuid)': [
+    { definition: 'OLD', captured_at: '2026-11-01T00:00:00Z', captured_by: 'migration:b' },
+  ] };
+  const plan = planRollback({ functions, history, live: { 'f(uuid)': 'NEW' } });
+  assert.equal(plan.creates.length, 0);
+  assert.equal(plan.restores.length, 1);
+  assert.equal(plan.restores[0].row.definition, 'OLD');
+});
+
+test('buildRollbackSql drops the functions the migration created', () => {
+  const sql = buildRollbackSql({
+    migrationName: 'x.sql',
+    restores: [],
+    creates: [{ key: 'dua_new_thing(uuid)' }],
+    generatedAt: '2026-11-28T00:00:00.000Z',
+  });
+  assert.match(sql, /Drops 1 function\(s\) the migration created from nothing\./);
+  assert.match(sql, /drop function if exists public\.dua_new_thing\(uuid\);/);
 });
 
 test('buildRollbackSql names every function it could not restore', () => {
