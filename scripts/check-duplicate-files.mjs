@@ -50,19 +50,12 @@ const ALLOWLIST = [
   { check: 'same-name', name: 'automation_companion.py', severity: 'ok', reason: 'apps/ai-engine copy is a 347 B re-export shim' },
   { check: 'same-name', name: 'coding_runner_server.py', severity: 'ok', reason: 'apps/ai-engine copy is a 230 B re-export shim' },
 
-  // --- known real duplicates, tracked, removal needs an owner decision -----
-  {
-    check: 'same-name',
-    name: 'dua_agent_prompts.json',
-    severity: 'warn',
-    reason: 'known duplicate, tracked as P10 in WORK_CHECKLIST.md; deleting one needs an owner decision',
-  },
-  {
-    check: 'same-content',
-    paths: ['apps/ai-engine/dua_engine/agent/dua_agent_prompts.json', 'apps/api/src/core/dua_agent_prompts.json'],
-    severity: 'warn',
-    reason: 'known duplicate (100 KB, byte identical), tracked as P10 in WORK_CHECKLIST.md; deleting one needs an owner decision',
-  },
+  // --- resolved duplicates -------------------------------------------------
+  // dua_agent_prompts.json used to exist twice (engine catalog plus a committed
+  // copy under apps/api/src/core). P10 removed the committed copy: the engine
+  // file is the single source of truth and deploy-cloudrun.sh materializes it
+  // into the container at build time. No allowlist entry is kept on purpose, so
+  // a re-committed copy fails this check instead of passing as a known warning.
 ];
 
 // ---------------------------------------------------------------------------

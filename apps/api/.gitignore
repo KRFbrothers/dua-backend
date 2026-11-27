@@ -1,2 +1,7 @@
 # Built website (from ../web); produced by deploy-cloudrun.sh / npm run build
 /site/
+
+# Starter-skill catalog, materialized at deploy time by deploy-cloudrun.sh from
+# apps/ai-engine/dua_engine/agent/dua_agent_prompts.json (the single source of
+# truth). Never commit a copy here; the duplicate-file check fails if one returns.
+/src/core/dua_agent_prompts.json

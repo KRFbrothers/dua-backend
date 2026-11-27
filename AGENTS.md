@@ -53,9 +53,10 @@ still lists `personal-agent` first and `apps/api/src/core/conversations.mjs` `lo
 hardcodes both. Work to do, not truth to copy.
 **4.7 No starter skill catalogue.** No fixed set of 5 skills as a product rule; the owner enables
 skills per agent, with no fixed catalogue size. `FACT:` the code lags.
-`apps/ai-engine/dua_engine/agent/dua_agent_prompts.json` and its copy
-`apps/api/src/core/dua_agent_prompts.json` still ship `frontend-developer`, `backend-architect`,
-`api-tester`, `devops-automator`, `code-reviewer`. Do not copy that list into new code.
+`apps/ai-engine/dua_engine/agent/dua_agent_prompts.json` still ships `frontend-developer`,
+`backend-architect`, `api-tester`, `devops-automator`, `code-reviewer`. It is the single source of
+truth; `deploy-cloudrun.sh` materializes it into the container at build time, so no committed copy
+exists under `apps/api/src/core/`. Do not copy that list into new code.
 **4.8 Owner lock fails closed.** Production refuses to start without a valid `DUA_ALLOWED_EMAIL` and
 returns 503. Never make that check optional to pass a test.
 **4.9 Status values stay in sync:** the mapping, the migration comment, this rule and the
