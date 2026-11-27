@@ -14,19 +14,35 @@ A readiness failure returns 503 so traffic moves to a healthy revision. Liveness
 Nothing here returns a secret, a project id, a model name or an error string from a
 provider. Only a short machine-readable reason, matching the privacy rule in the Node
 request logger.
+
+Deliberately stdlib only. The CI job that runs these tests builds an isolated venv with
+Flask and pytest and nothing else, so a module-level `import requests` made the whole
+test module fail to collect. A probe should also not pay for a third-party import at
+cold start.
 """
 from __future__ import annotations
 
 import os
 import time
+import urllib.error
+import urllib.request
 
-import requests
 from flask import Blueprint, jsonify
 
 health = Blueprint("dua_health", __name__)
 
 _STARTED = time.monotonic()
 _TIMEOUT = 4.0
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A probe must not follow a redirect: the answer is about this exact URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 def _no_store(payload, status: int):
@@ -41,10 +57,14 @@ def _check_supabase() -> dict:
     key = os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_PUBLISHABLE_KEY") or ""
     if not base.startswith("https://") or not key:
         return {"ok": False, "reason": "not_configured"}
+    request = urllib.request.Request(f"{base}/auth/v1/health", headers={"apikey": key}, method="GET")
     try:
-        response = requests.get(f"{base}/auth/v1/health", headers={"apikey": key}, timeout=_TIMEOUT)
-        return {"ok": True} if response.ok else {"ok": False, "reason": f"status_{response.status_code}"}
-    except requests.RequestException:
+        with _OPENER.open(request, timeout=_TIMEOUT) as response:
+            status = getattr(response, "status", 0)
+            return {"ok": True} if 200 <= status < 300 else {"ok": False, "reason": f"status_{status}"}
+    except urllib.error.HTTPError as error:
+        return {"ok": False, "reason": f"status_{error.code}"}
+    except Exception:  # noqa: BLE001 - any transport failure is the same answer to a probe
         return {"ok": False, "reason": "unreachable"}
 
 
