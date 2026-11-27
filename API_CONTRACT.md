@@ -4,6 +4,21 @@ Two processes. Point the new UI at them with `API_BASE_URL` (Node API) and `ENGI
 
 The engine is Flask. The API is a Node HTTP server. Neither serves a website.
 
+## Repository documents
+
+Three files describe this repository, and each owns one thing. They deliberately do not restate each other, so a change in one does not silently contradict the others.
+
+| File | Owns | Does not own |
+|---|---|---|
+| `AGENTS.md` | Rules for agents working in this repository: core rules, change workflow, archive rules, product naming, the four control-plane action names, the recommended task statuses, and the pointer to `docs/MASTER_PLAN.md`. | Routes, request bodies, response shapes, status codes. |
+| `API_CONTRACT.md` (this file) | The wire-level contract: routes, headers, bodies, responses, status codes, limits. | Agent working rules. |
+| [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md) | Approved backend roadmap and owner decisions. | Routes and agent rules. |
+
+The strings this file shares with `AGENTS.md` are the four control-plane action names and the six lifecycle statuses. They are not covered by the same assertion, so read the next two sentences carefully.
+
+`apps/api/test/agents-md.test.mjs:30-35` asserts the four action and route rows in both `README.md` and this file, so a renamed action or route in this file does fail the pull request. The six lifecycle statuses are asserted only against `AGENTS.md`, at `apps/api/test/agents-md.test.mjs:27`. No test reads the status list out of this file, so a status typo here is caught by review, not by CI. Both sets still have to change together, and `AGENTS.md` section 6.13 names the four places a new status touches.
+
+
 ## How a new UI connects
 
 | Client | What to send |
@@ -488,6 +503,16 @@ Control-plane actions map onto existing routes:
 | `create_task` | `POST /api/orhan/tasks` |
 | `get_task_status` | `GET /api/orhan/tasks/:id` |
 | `stop_task` | `POST /api/orhan/tasks/:id/cancel` |
+
+Provenance: the action names are defined in `AGENTS.md` (section `## Initial Control-Plane Actions`), and each row above maps to a route that exists in `apps/api/src`. Every line below was read in the file, not inferred from the route name.
+
+| Action | Route | Implementation |
+|---|---|---|
+| `direct_reply` | `POST /api/chat` | `apps/api/src/server/service-handler.mjs:102` matches the path and `:108` dispatches to `handleChat`, defined at `apps/api/src/core/providers.mjs:246`. |
+| `create_task` | `POST /api/orhan/tasks` | `apps/api/src/server/service-handler.mjs:76` routes every `/api/orhan/tasks*` request to `handleOrhanTasks`, and `createTask` is at `apps/api/src/core/orhan-tasks.mjs:101`. |
+| `get_task_status` | `GET /api/orhan/tasks/:id` | `apps/api/src/server/service-handler.mjs:76`, then `getTask` at `apps/api/src/core/orhan-tasks.mjs:211`, reached from the GET branch at `apps/api/src/core/orhan-tasks.mjs:64`. |
+| `stop_task` | `POST /api/orhan/tasks/:id/cancel` | `apps/api/src/server/service-handler.mjs:76`, then `cancelTask` at `apps/api/src/core/orhan-tasks.mjs:314`. |
+
 
 ### Workflows
 
