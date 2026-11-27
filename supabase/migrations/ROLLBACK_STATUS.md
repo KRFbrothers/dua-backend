@@ -3,9 +3,10 @@
 Inventory of every file in `supabase/migrations/` and whether it can be rolled back.
 
 `AGENTS.md` 4.11 and `CONTRIBUTING.md` section 5 both require a rollback file beside every
-migration. `AGENTS.md` 4.11 also records the current fact: 27 migrations exist, two have a
-rollback file (`202611280001_dua_function_history.rollback.sql` and
-`202611280002_dua_quota_rpc_dispatch.rollback.sql`).
+migration. `AGENTS.md` 4.11 also records the current fact: 28 migrations exist, three have a
+rollback file (`202611280001_dua_function_history.rollback.sql`,
+`202611280002_dua_quota_rpc_dispatch.rollback.sql` and
+`202611280003_dua_task_links_event_backfill.rollback.sql`).
 This file is the record of that gap, one row per migration, so the next schema change can be
 judged against a known baseline instead of a guess.
 
@@ -13,13 +14,13 @@ judged against a known baseline instead of a guess.
 
 | Metric | Count |
 | --- | --- |
-| Total migrations | 27 |
-| Rollback possible (YES) | 21 |
+| Total migrations | 28 |
+| Rollback possible (YES) | 22 |
 | Rollback not possible (NO) | 6 |
 | Unknown | 0 |
-| Rollback file present | 2 |
+| Rollback file present | 3 |
 
-Read the counts as: 21 files can be undone with a written down script, 6 cannot be undone
+Read the counts as: 22 files can be undone with a written down script, 6 cannot be undone
 without losing data or without re-applying an earlier migration's function bodies. None is
 unknown, because every file was read in full.
 
@@ -75,6 +76,7 @@ repo reads it yet, so adding one is a separate decision.
 | 25 | `202611270001_dua_task_lifecycle_workers.sql` | Adds five columns and four constraints to `dua_orhan_tasks`, creates `dua_task_events` and `dua_workers`, adds six functions and an append-only trigger | NO | Would need `drop column` on five columns plus dropping two tables and six functions | Dropping the columns destroys parent and root task links, the attempt counter and the idempotency key, so retry and continue history is lost. `dua_task_events` is the audit trail and cannot be rebuilt. |
 | 26 | `202611280001_dua_function_history.sql` | Creates `dua_function_history`, the `dua_capture_function` helper and two indexes, and captures the current body of eleven workflow functions | YES | `202611280001_dua_function_history.rollback.sql` beside it: drop the helper, the two indexes, then the table | Data loss: every captured function definition is deleted, so a function replaced after this migration loses its restore point. Export the table first if a body is still needed. The table is inert until a migration calls the helper, so the rollback cannot break a running workflow. |
 | 27 | `202611280002_dua_quota_rpc_dispatch.sql` | Moves the `dua_consume_imagine` and `dua_start_voice_session` bodies to `_v2` names and leaves the public names as thin dispatchers, so a future signature change is a swap instead of a `drop function` | YES | `202611280002_dua_quota_rpc_dispatch.rollback.sql` beside it, generated from `dua_function_history`: restore both public bodies, then `drop function` the two `_v2` names | Data loss: none. Quota counters and voice sessions are untouched, and the dispatcher passes every argument through unchanged. The rollback drops the `_v2` functions, so a caller that started using `_v2` directly would break; the API calls the public names only. |
+| 28 | `202611280003_dua_task_links_event_backfill.sql` | Copies `end_reason`, `finished_at_ms` and `stopped_at_ms` from `dua_orhan_tasks` into one `dua_task_events` row per finished task, so the three columns from file 24 become a cache instead of the only copy | YES | `202611280003_dua_task_links_event_backfill.rollback.sql` beside it, hand written because no function body changes: drop the append-only trigger, delete the rows marked `backfill_migration = 202611280003`, recreate the trigger | Data loss: none. The three values stay in `dua_orhan_tasks`, which this file only reads. The rollback has to drop the append-only trigger for the length of one transaction, so a concurrent writer could in principle delete an event row in that window; the delete itself only matches rows carrying the backfill marker. |
 
 ## The six that cannot be rolled back
 
