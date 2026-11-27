@@ -62,6 +62,12 @@ pull request, because there is nothing to pass.
 | `google-cloud` | `pytest` on `apps/ai-engine/tests`, mocked and then with the real ADK SDK |
 | `backend` | `npm run test:ci` in `apps/api` |
 
+`.github/workflows/duplicate-files.yml` runs on the same triggers and fails when the same fact gets a
+second home: a file name that appears twice, two byte-identical files, a second doc claiming a topic
+that already has a canonical file, or two `.md` files that are mostly the same lines. Run it locally
+with `node scripts/check-duplicate-files.mjs` (`--verbose` shows the allowlisted cases and why each
+one is allowed).
+
 Two checks are manual and never run in CI, because both need a live Supabase project:
 
 ```bash
