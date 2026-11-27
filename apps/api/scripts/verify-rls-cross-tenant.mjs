@@ -45,7 +45,8 @@ export const SELECT_ONLY_TABLES = Object.freeze([
 ]);
 
 // Tables with no owner_id at all. Listed so the report can say they were considered and skipped.
-export const UNOWNED_TABLES = Object.freeze(['dua_workers', 'dua_workflow_deliveries']);
+// dua_function_history is infrastructure: service_role only, no owner column.
+export const UNOWNED_TABLES = Object.freeze(['dua_workers', 'dua_workflow_deliveries', 'dua_function_history']);
 
 // Tables where the owner cannot delete or update through PostgREST, so S3/S4 are not applicable.
 // dua_messages and dua_task_events are append-only by design (select + insert policies only).
