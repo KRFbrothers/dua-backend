@@ -207,3 +207,148 @@ shipped behaviour; this file describes the target and the order of work.
 - Running `db push` or any deploy.
 - Android client changes.
 - Moving or deleting data in `dua_cloud_snapshots`.
+
+## 5. Phase plan (7 phases)
+
+Source of truth for phase scope is this file. The HTML roadmap page is a rendered view of it, and
+where the two disagree this file wins. The phase list, the week estimates and the reuse estimate
+come from that page. The audit in
+[`audits/2026-11-27-rls-and-roadmap-audit.md`](audits/2026-11-27-rls-and-roadmap-audit.md)
+checked that page against the code and corrected several numbers; the corrections are applied
+below. Week estimates are planning estimates, not measurements: the audit found no code evidence
+for them.
+
+Shipped work that these phases build on is recorded in section 3 (PR A to PR J). This section does
+not repeat it.
+
+### Corrections applied from the audit
+
+| Roadmap said | Code says | Where |
+|---|---|---|
+| `owner_id` in 18 tables | 24 of 26 tables | audit 2.3, section 5 |
+| 4 RLS policies per table | 0 to 4, 61 `create policy` total | audit section 1, 5 |
+| 27 migration files | 25 | audit section 5 |
+| 30,140 total lines | 42,367 | audit section 5 |
+| 22 tables | 22 by `if not exists public`, 26 by `create table` | audit 2.10 |
+| no delegation, same prompt only | ADK planner, per-subtask helpers, merger, reviewer | audit 2.4 |
+| connectors read-only | `advanced-integrations.mjs` read-only, `github-write.mjs` writes | audit 2.5 |
+| memory keyword only | notes semantic, artifacts and memories keyword | audit 2.6 |
+
+### Phase 0: Foundation (2 weeks)
+
+Goal: tenancy ki neev, do users do workspaces me, ek doosre ka data nahi dekh sakte.
+
+- 0.1 `workspaces` + `members` + `invites` tables with RLS.
+- 0.2 Personal workspace backfill script.
+- 0.3 `workspace_ids` claim in the JWT.
+- 0.4 Tenant resolve middleware in the gateway.
+
+Exit condition: two test users in two workspaces, and a cross-workspace read returns zero rows.
+
+Starting point: `workspace_id` has 0 hits in `supabase/migrations/`, `apps/api/src` and
+`apps/ai-engine`, and there is no member, invite, workspace or tenant table (audit 2.3).
+
+### Phase 1: Tenancy cutover (3 weeks)
+
+Goal: `owner_id` se `workspace_id` pe switch, bina data loss.
+
+- 1.1 `workspace_id` in the 24 owner tables plus backfill (24 of 26, not 18).
+- 1.2 Dual RLS policies, old and new, side by side.
+- 1.3 Code shifts to `workspace_id` behind a feature flag.
+- 1.4 `owner_id` drop after a 2 week soak.
+
+Exit condition: `grep -c owner_id apps/api/src` is 0 (audit columns excluded), all 26 tables are on
+workspace RLS, and the cross-tenant test is green.
+
+Risk: highest phase. 25 migrations, 61 `create policy` statements and every RPC signature are in
+scope.
+
+### Phase 2: Orchestration (4 weeks, scope reduced)
+
+Goal: ek task me 3 agents chain me, har hop ka trace, budget exhaust pe clean stop.
+
+- 2.1 `agent_edges` + `task_delegations` tables.
+- 2.2 Delegation protocol (payload, budget, deadline).
+- 2.3 Router agent (intent classify).
+- 2.4 Depth limit + cycle detection.
+- 2.5 Trace UI (delegation tree).
+
+Exit condition: a 3 hop delegation runs end to end, stores its trace, and stops cleanly at budget.
+
+Scope note: `apps/ai-engine/dua_engine/agent/agent_adk.py` already has a real ADK graph (planner at
+758-767, one helper per subtask at 773-800, merger at 821, optional reviewer and reviser at 822-866,
+root `SequentialAgent` at 866). That is in-engine decomposition with static roles, not peer
+agent-to-agent handoff, so this phase is about the DB layer, the budget and the trace, not about
+building orchestration from zero. The roadmap's "no handoff at all" claim was wrong and is corrected
+here.
+
+### Phase 3: Memory (2 weeks, partially exists)
+
+Goal: "kal jo baat hui" query pe relevant memory aaye, keyword match ke bina bhi.
+
+- 3.1 `memory_vectors` + HNSW index.
+- 3.2 Embedding job (backfill + on-write).
+- 3.3 Hybrid retrieval (vector + keyword + RRF).
+- 3.4 `user:` and `agent:` scope.
+
+Exit condition: a paraphrase query with no keyword overlap returns the right memory, and the scope
+filters hold.
+
+Scope note: notes already have semantic search (`agent_notes.py:158-162`, `app.py:1077-1078`), with
+exact cosine bounded at 6000 rows (`agent_documents.py:5-6, 176`). Artifacts and memories are
+keyword only (`artifacts-memories.mjs:361`). This phase extends an existing path, it does not start
+one.
+
+### Phase 4: Connectors (4 weeks, 4.4 partially exists)
+
+Goal: user GitHub connect kare, agent file likh sake, token DB me encrypted ho.
+
+- 4.1 `connectors` + `connector_tokens` + KMS.
+- 4.2 OAuth flow (state HMAC, callback).
+- 4.3 Token refresh job.
+- 4.4 GitHub write actions.
+- 4.5 Second provider (Slack or Google).
+- 4.6 DB backed rate limiter.
+
+Exit condition: a connected GitHub account lets an agent open a PR from a `dua/*` branch, and the
+token is unreadable at rest.
+
+Scope note: `github-write.mjs` already creates blobs, trees, commits, refs and pull requests, fenced
+to `refs/heads/dua/*` with no PATCH, PUT or DELETE (lines 5-7, 22-26, 54, 56). What is missing is
+per-user OAuth and encrypted storage, not the write path itself. `advanced-integrations.mjs` stays
+read-only (lines 9, 15).
+
+### Phase 5: Quota + billing (3 weeks)
+
+Goal: free plan limit hit pe clean 402, upgrade pe instant unlock.
+
+- 5.1 `usage_events` append-only.
+- 5.2 Meter: LLM token, sandbox second, storage byte.
+- 5.3 Plan limits + enforcement.
+- 5.4 Stripe subscription + webhook.
+- 5.5 Invoice + dunning.
+
+Exit condition: a free account gets 402 at the limit, a paid account unlocks immediately, and every
+charge traces to a usage event.
+
+Starting point: a durable request counter with an advisory lock already exists
+(`202610040002_dua_usage.sql:18`, 17 sites in 7 files), and there is zero billing code (audit 2.8).
+
+### Phase 6: Scale (4 weeks)
+
+Goal: 1000 concurrent chat, p99 under 2s, ek tenant ka spike doosre ko na mare.
+
+- 6.1 Sandbox pool (warm containers).
+- 6.2 Redis event bus.
+- 6.3 Read replicas for chat history.
+- 6.4 Per-tenant rate limit + fair queue.
+- 6.5 Observability: trace, metric and log per tenant.
+
+Exit condition: a load test at 1000 concurrent chats holds p99 under 2s, and one tenant's spike
+leaves other tenants' latency flat.
+
+### Estimate
+
+22 weeks for a 3 to 4 engineer team, 12 to 18 months solo, per the roadmap page. The 55% reuse
+figure is a file level judgement, not a line level measurement. Both are estimates, not
+measurements.
