@@ -158,6 +158,8 @@ No formatter, linter, type checker or separate build step is configured in this 
 ## Project Docs
 
 - [`AGENTS.md`](AGENTS.md) — rules for agents working in this repository.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — human workflow: setup, branch, pull request, merge.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — how the system is built today.
 - [`API_CONTRACT.md`](API_CONTRACT.md) — public HTTP API of `dua-api` and `dua-ai-engine`.
 - [`SUPABASE.md`](SUPABASE.md) — Supabase setup, migrations and data rules.
 - [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md) — approved backend roadmap and owner decisions.
