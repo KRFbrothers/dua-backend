@@ -13,6 +13,10 @@ COPY --chown=dua:dua adk_examples/ ./adk_examples/
 COPY --chown=dua:dua evals/ ./evals/
 USER 10001:10001
 EXPOSE 8080
+# Probe /healthz, not /. `/` answers 200 even when the Supabase or Vertex credentials
+# have expired, so it cannot tell a working revision from a broken one. /healthz is
+# liveness only (no network, no credentials), which is what a container healthcheck
+# wants: a dependency outage must not restart an otherwise healthy process.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3)"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"
 CMD ["python", "adk_server.py"]

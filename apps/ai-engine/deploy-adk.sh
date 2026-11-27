@@ -24,7 +24,10 @@ case "$adk_action" in
       --config "$adk_root/apps/ai-engine/cloudbuild-adk.yaml" \
       --substitutions "_IMAGE=$ADK_IMAGE,_SOURCE_SHA=$(git -C "$adk_root" rev-parse HEAD)"
     gcloud run deploy "$adk_service" --project "$adk_project" --region "$adk_region" --image "$ADK_IMAGE" \
-      --timeout 900 --no-traffic --tag adk-candidate --update-env-vars "AGENT_ENGINE=adk,ADK_PRODUCTION=1,DUA_BUILD_SHA=$(git -C "$adk_root" rev-parse HEAD)"
+      --timeout 900 --no-traffic --tag adk-candidate \
+      --startup-probe="httpGet.path=/healthz,httpGet.port=8080,initialDelaySeconds=5,timeoutSeconds=3,periodSeconds=5,failureThreshold=12" \
+      --liveness-probe="httpGet.path=/healthz,httpGet.port=8080,timeoutSeconds=3,periodSeconds=30,failureThreshold=3" \
+      --update-env-vars "AGENT_ENGINE=adk,ADK_PRODUCTION=1,DUA_BUILD_SHA=$(git -C "$adk_root" rev-parse HEAD)"
     echo "Candidate staged at 0% traffic. Rollback snapshot: $adk_snapshot"
     echo 'Verify candidate owner-only capabilities, migrations and the intended live flow before promote.'
     ;;

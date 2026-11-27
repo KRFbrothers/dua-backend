@@ -10,6 +10,8 @@ export const DEFAULT_TABLES = Object.freeze([
   'dua_conversations', 'dua_messages', 'dua_agents', 'dua_agent_skills',
   'dua_conversation_agents', 'dua_artifact_versions', 'dua_agent_instructions', 'dua_agent_triggers',
   'dua_device_tokens', 'dua_notifications',
+  // Phase 3: append-only task event log and the worker registry.
+  'dua_task_events', 'dua_workers',
 ]);
 const fail = reason => ({ ok: false, reason });
 function configuration(env) {

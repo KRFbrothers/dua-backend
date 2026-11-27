@@ -3,12 +3,13 @@
 import { readJsonLimited } from './limited-json.mjs';
 import { resolveOwner, StorageError } from './storage.mjs';
 import { engineEndpoint, engineHeaders } from './engine-client.mjs';
+import { createTaskEventWriter, readTaskEvents } from './task-events.mjs';
 
 const MAX_STEPS = 12;
 const MAX_MINUTES = 10;
 const MAX_OUTPUT = 12000;
 const TIME_LIMIT_ERROR = 'This task reached its 10 minute limit.';
-const COLUMNS = 'task_id,title,prompt,status,plan,steps,artifact,error,run_count,started_at_ms,created_at_ms,updated_at_ms,end_reason,finished_at_ms,stopped_at_ms';
+const COLUMNS = 'task_id,title,prompt,status,plan,steps,artifact,error,run_count,started_at_ms,created_at_ms,updated_at_ms,end_reason,finished_at_ms,stopped_at_ms,parent_task_id,root_task_id,continue_thread_id,attempt,idempotency_key';
 // README task lifecycle. The stored `status` stays the legacy value for existing clients.
 const LIFECYCLE = { waiting: 'queued', running: 'running', approval_needed: 'running', completed: 'completed', failed: 'failed', cancelled: 'stopped' };
 const noStore = (error, status, extra = {}) => Response.json({ error, ...extra }, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -31,10 +32,12 @@ export async function handleOrhanTasks(request, { env = process.env, fetcher = f
   if (parts[0] !== 'api' || parts[1] !== 'orhan' || parts[2] !== 'tasks' || parts.length > 5) return noStore('Not found.', 404);
   const taskId = parts[3] || '';
   const action = parts[4] || '';
-  if ((parts.length === 5 && !['start', 'continue', 'cancel', 'retry'].includes(action)) || (taskId && !UUID.test(taskId))) return noStore('Not found.', 404);
+  if ((parts.length === 5 && !['start', 'continue', 'cancel', 'retry', 'events'].includes(action)) || (taskId && !UUID.test(taskId))) return noStore('Not found.', 404);
   if (parts.length === 3 && !['GET', 'POST'].includes(request.method)) return noStore('Method not allowed.', 405);
   if (parts.length === 4 && request.method !== 'GET') return noStore('Method not allowed.', 405);
-  if (parts.length === 5 && request.method !== 'POST') return noStore('Method not allowed.', 405);
+  // `events` is a read of the append-only trail; every other action is a POST.
+  if (parts.length === 5 && action === 'events' && request.method !== 'GET') return noStore('Method not allowed.', 405);
+  if (parts.length === 5 && action !== 'events' && request.method !== 'POST') return noStore('Method not allowed.', 405);
 
   let owner;
   try { owner = await resolveOwner(request, { env, fetcher, feature: 'Dua Agent' }); }
@@ -46,6 +49,10 @@ export async function handleOrhanTasks(request, { env = process.env, fetcher = f
   const endpoint = `${base}/rest/v1/dua_orhan_tasks`;
   const headers = { apikey: key, Authorization: `Bearer ${owner.token}`, Accept: 'application/json' };
   const db = (path, init) => fetcher(endpoint + path, { redirect: 'error', ...init, headers: { ...headers, ...(init.headers || {}) }, signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]) });
+  // The event log lives in its own table, so it needs its own base path.
+  // task-events.mjs builds full /rest/v1/... paths, so this caller only adds the origin.
+  const eventsDb = (path, init) => fetcher(`${base}${path}`, { redirect: 'error', ...init, headers: { ...headers, ...(init.headers || {}) }, signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]) });
+  const log = (taskId, event, detail) => createTaskEventWriter({ db: eventsDb, ownerId: owner.user.id, taskId, signal: request.signal })(event, detail);
 
   const lockKey = `${owner.user.id}:${taskId || 'list'}`;
   if (action === 'start' || action === 'continue' || action === 'retry') {
@@ -53,19 +60,32 @@ export async function handleOrhanTasks(request, { env = process.env, fetcher = f
     inflight.add(lockKey);
   }
   try {
+    if (request.method === 'GET' && taskId && action === 'events') return await listEvents(eventsDb, taskId);
     if (request.method === 'GET' && taskId) return await getTask(db, taskId);
     if (request.method === 'GET') return await listTasks(db, owner.user.id);
-    if (parts.length === 3) return await createTask(request, db, owner, env, fetcher);
-    if (action === 'start') return await startTask(db, owner.user.id, taskId);
-    if (action === 'continue') return await continueTask(db, taskId, env, fetcher, owner.token);
-    if (action === 'cancel') return await cancelTask(db, taskId);
-    return await retryTask(db, taskId);
+    if (parts.length === 3) return await createTask(request, db, owner, env, fetcher, log);
+    if (action === 'start') return await startTask(db, owner.user.id, taskId, log);
+    if (action === 'continue') return await continueTask(db, taskId, env, fetcher, owner.token, log);
+    if (action === 'cancel') return await cancelTask(db, taskId, log);
+    return await retryTask(db, taskId, log);
   } catch (error) {
     if (error instanceof Response) return error;
     return noStore('Dua Agent is temporarily unavailable. Retry.', 502);
   } finally {
     inflight.delete(lockKey);
   }
+}
+
+/** Item 2.2 read path: the append-only trail for one task, oldest first. */
+async function listEvents(eventsDb, taskId) {
+  const events = await readTaskEvents({ db: eventsDb, taskId, limit: 200 });
+  return Response.json({ events: events.map(row => ({
+    seq: Number(row.seq),
+    event: row.event,
+    stepId: row.step_id || null,
+    detail: row.detail || null,
+    at: row.created_at,
+  })) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
 async function listTasks(db, ownerId) {
@@ -78,7 +98,7 @@ async function listTasks(db, ownerId) {
   return Response.json({ tasks: rows.map(present) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
-async function createTask(request, db, owner, env, fetcher) {
+async function createTask(request, db, owner, env, fetcher, log) {
   let data;
   try { data = await readJsonLimited(request, 16 * 1024); }
   catch (error) { return noStore(error.status === 413 ? 'The job is too long.' : 'Invalid job.', error.status || 400); }
@@ -93,6 +113,32 @@ async function createTask(request, db, owner, env, fetcher) {
     if (existing) return replay(existing, prompt);
   }
   const team = Array.isArray(data?.team) ? data.team : null;
+  // Items 3.1, 3.2, 3.3: a follow-up task can name the task it continues. The parent must
+  // exist and belong to this owner (RLS on the read enforces that), otherwise the link is
+  // refused instead of silently ignored. The root is inherited from the parent when present,
+  // so a chain can be walked without recursing.
+  let parent = null;
+  if (data.parentTaskId !== undefined) {
+    if (typeof data.parentTaskId !== 'string' || !UUID.test(data.parentTaskId)) return noStore('Invalid parentTaskId.', 400);
+    parent = await findTask(db, data.parentTaskId.toLowerCase());
+    if (!parent) return noStore('That parent task was not found.', 404);
+  }
+  let continueThreadId = null;
+  if (data.continueThreadId !== undefined) {
+    if (typeof data.continueThreadId !== 'string' || !UUID.test(data.continueThreadId)) return noStore('Invalid continueThreadId.', 400);
+    continueThreadId = data.continueThreadId.toLowerCase();
+  } else if (parent?.continue_thread_id) {
+    // An explicit thread wins; otherwise the child stays on its parent's thread.
+    continueThreadId = parent.continue_thread_id;
+  }
+  let idempotencyKey = null;
+  if (data.idempotencyKey !== undefined) {
+    if (typeof data.idempotencyKey !== 'string' || !data.idempotencyKey.trim() || data.idempotencyKey.length > 200) return noStore('Invalid idempotencyKey.', 400);
+    idempotencyKey = data.idempotencyKey.trim();
+    // A reused key returns the task that already owns it, the same way requestId does.
+    const existing = await findByKey(db, idempotencyKey);
+    if (existing) return replay(existing, prompt);
+  }
   const target = engineUrl(env, '/api/orhan/plan');
   if (!target) return noStore('Dua Agent\'s AI engine is not configured.', 503);
   let plan;
@@ -111,9 +157,10 @@ async function createTask(request, db, owner, env, fetcher) {
   }
   if (!plan) return noStore('Dua Agent returned a plan with tools that are not allowed.', 502);
   const now = Date.now();
+  const taskId = requestId || crypto.randomUUID();
   const row = {
     owner_id: owner.user.id,
-    task_id: requestId || crypto.randomUUID(),
+    task_id: taskId,
     title: plan.title,
     prompt,
     status: 'waiting',
@@ -125,10 +172,17 @@ async function createTask(request, db, owner, env, fetcher) {
     started_at_ms: 0,
     created_at_ms: now,
     updated_at_ms: now,
+    parent_task_id: parent ? parent.task_id : null,
+    // A first task is its own root, so every chain has exactly one root without a backfill.
+    root_task_id: parent ? (parent.root_task_id || parent.task_id) : taskId,
+    continue_thread_id: continueThreadId,
+    attempt: 1,
+    idempotency_key: idempotencyKey,
   };
   const saved = await write(db, '', 'POST', row, { duplicate: Boolean(requestId) });
   if (saved === DUPLICATE) return replay(await load(db, requestId), prompt);
   if (saved instanceof Response) return saved;
+  await log(taskId, 'created', { parentTaskId: parent ? parent.task_id : undefined, status: 'waiting' });
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -144,6 +198,14 @@ async function findTask(db, taskId) {
     if (error instanceof Response && error.status === 404) return null;
     throw error;
   }
+}
+
+/** Item 3.5: look a task up by its idempotency key. Returns null when the key is unused. */
+async function findByKey(db, key) {
+  const response = await db(`?select=${COLUMNS}&idempotency_key=eq.${encodeURIComponent(key)}&limit=1`, { method: 'GET' });
+  if (!response.ok) return null;
+  const rows = await response.json();
+  return Array.isArray(rows) && rows[0] ? rows[0] : null;
 }
 
 async function getTask(db, taskId) {
@@ -163,8 +225,10 @@ async function expireOverdue(db, filter) {
   return saved instanceof Response ? saved : null;
 }
 
-async function startTask(db, ownerId, taskId) {
+async function startTask(db, ownerId, taskId, log) {
   await load(db, taskId);
+  // The lazy sweep stays as it was; its timed_out events are written by the background
+  // reaper (task-reaper.mjs), which sees the rows it moved.
   const expired = await expireOverdue(db, `&owner_id=eq.${ownerId}`);
   if (expired instanceof Response) return expired;
   const running = await db(`?select=task_id&owner_id=eq.${ownerId}&status=eq.running&limit=1`, { method: 'GET' });
@@ -176,24 +240,26 @@ async function startTask(db, ownerId, taskId) {
   const saved = await write(db, `?task_id=eq.${taskId}&status=eq.waiting`, 'PATCH', { status: 'running', error: null, started_at_ms: now, updated_at_ms: now });
   if (saved instanceof Response) return saved;
   if (!saved) return await missingOrConflict(db, taskId, 'This task is no longer waiting.');
+  await log(taskId, 'started', { fromStatus: 'waiting', toStatus: 'running' });
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
-async function continueTask(db, taskId, env, fetcher, token) {
+async function continueTask(db, taskId, env, fetcher, token, log) {
   const current = await load(db, taskId);
   if (current instanceof Response) return current;
   if (current.status !== 'running') return noStore('Start the task first.', 409);
   if (Date.now() - Number(current.started_at_ms) > MAX_MINUTES * 60 * 1000) {
-    return await finish(db, taskId, current, 'failed', TIME_LIMIT_ERROR, 'timeout');
+    return await finish(db, taskId, current, 'failed', TIME_LIMIT_ERROR, 'timeout', log);
   }
   if (Number(current.run_count) >= MAX_STEPS) {
-    return await finish(db, taskId, current, 'failed', 'This task reached its step limit.', 'step_limit');
+    return await finish(db, taskId, current, 'failed', 'This task reached its step limit.', 'step_limit', log);
   }
   const steps = current.steps.map(step => ({ ...step }));
   const step = nextStep(steps);
-  if (!step) return await finish(db, taskId, { ...current, steps }, outcome(steps), current.error);
+  if (!step) return await finish(db, taskId, { ...current, steps }, outcome(steps), current.error, log);
   const target = engineUrl(env, '/api/orhan/step');
   if (!target) return noStore('Dua Agent\'s AI engine is not configured.', 503);
+  await log(taskId, 'step_started', { stepId: step.id, stepIndex: step.id, runCount: Number(current.run_count) });
   let result;
   try {
     const response = await fetcher(target, {
@@ -223,6 +289,10 @@ async function continueTask(db, taskId, env, fetcher, token) {
   }
   nextStep(updated);
   const status = outcome(updated);
+  // The engine's output is never written to the event log, only whether the step passed.
+  await log(taskId, currentStep.status === 'completed' ? 'step_completed' : 'step_failed', {
+    stepId: step.id, stepIndex: step.id, runCount: Number(fresh.run_count) + 1, status: currentStep.status,
+  });
   const artifact = status === 'completed' ? { title: fresh.title, text: updated.find(item => item.id === 'document').output, mime: 'text/markdown' } : fresh.artifact;
   const now = Date.now();
   const saved = await write(db, `?task_id=eq.${taskId}&status=eq.running`, 'PATCH', {
@@ -236,10 +306,12 @@ async function continueTask(db, taskId, env, fetcher, token) {
   });
   if (saved instanceof Response) return saved;
   if (!saved) return loadResponse(db, taskId);
+  if (status === 'completed') await log(taskId, 'completed', { runCount: Number(fresh.run_count) + 1, toStatus: 'completed' });
+  else if (status === 'failed') await log(taskId, 'failed', { runCount: Number(fresh.run_count) + 1, toStatus: 'failed', endReason: 'error' });
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
-async function cancelTask(db, taskId) {
+async function cancelTask(db, taskId, log) {
   const now = Date.now();
   const saved = await write(db, `?task_id=eq.${taskId}&status=in.(waiting,running)`, 'PATCH', { status: 'cancelled', end_reason: 'user_stop', stopped_at_ms: now, updated_at_ms: now });
   if (saved instanceof Response) return saved;
@@ -249,10 +321,11 @@ async function cancelTask(db, taskId) {
     if (current.status === 'cancelled') return Response.json({ task: present(current) }, { headers: { 'Cache-Control': 'no-store' } });
     return noStore('This task can no longer be cancelled.', 409);
   }
+  await log(taskId, 'cancelled', { toStatus: 'cancelled', endReason: 'user_stop' });
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
-async function retryTask(db, taskId) {
+async function retryTask(db, taskId, log) {
   const current = await load(db, taskId);
   if (current instanceof Response) return current;
   if (current.status !== 'failed') return noStore('Only a failed task can be retried.', 409);
@@ -263,9 +336,13 @@ async function retryTask(db, taskId) {
     if (step.status === 'failed' || (reset && step.status === 'skipped')) return { ...step, status: 'pending', output: '', error: null };
     return step;
   });
-  const saved = await write(db, `?task_id=eq.${taskId}&status=eq.failed`, 'PATCH', { status: 'waiting', steps, error: null, artifact: null, end_reason: null, finished_at_ms: null, stopped_at_ms: null, updated_at_ms: Date.now() });
+  // Item 3.4: a retry is a new attempt, so the counter moves. It is the only column that
+  // answers "how many times has this task been tried", which run_count (a step counter) cannot.
+  const attempt = Math.max(1, Number(current.attempt) || 1) + 1;
+  const saved = await write(db, `?task_id=eq.${taskId}&status=eq.failed`, 'PATCH', { status: 'waiting', steps, error: null, artifact: null, end_reason: null, finished_at_ms: null, stopped_at_ms: null, updated_at_ms: Date.now(), attempt });
   if (saved instanceof Response) return saved;
   if (!saved) return noStore('This task is no longer failed.', 409);
+  await log(taskId, 'retry', { fromStatus: 'failed', toStatus: 'waiting', attempt });
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -304,13 +381,16 @@ function ending(status, now, reason = 'error') {
   return {};
 }
 
-async function finish(db, taskId, current, status, error, reason = 'error') {
+async function finish(db, taskId, current, status, error, reason = 'error', log) {
   const now = Date.now();
   const saved = await write(db, `?task_id=eq.${taskId}&status=eq.running`, 'PATCH', {
     status, error, steps: current.steps, updated_at_ms: now, ...ending(status, now, reason),
   });
   if (saved instanceof Response) return saved;
   if (!saved) return loadResponse(db, taskId);
+  // reason === 'timeout' is the one terminal failure that has its own event name.
+  const event = status === 'completed' ? 'completed' : reason === 'timeout' ? 'timed_out' : 'failed';
+  await log(taskId, event, { fromStatus: 'running', toStatus: status, endReason: reason });
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -398,6 +478,12 @@ function present(row) {
     finishedAtMs: Number(row.finished_at_ms) || null,
     stoppedAtMs: Number(row.stopped_at_ms) || null,
     endReason: row.end_reason || null,
+    // Phase 3 items 3.1 to 3.5. Persisted columns, echoed back so a client can walk a chain.
+    parentTaskId: row.parent_task_id || null,
+    rootTaskId: row.root_task_id || null,
+    continueThreadId: row.continue_thread_id || null,
+    attempt: Number(row.attempt) || 1,
+    idempotencyKey: row.idempotency_key || null,
     limits: { maxSteps: MAX_STEPS, maxMinutes: MAX_MINUTES },
   };
 }
