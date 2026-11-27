@@ -207,3 +207,48 @@ shipped behaviour; this file describes the target and the order of work.
 - Running `db push` or any deploy.
 - Android client changes.
 - Moving or deleting data in `dua_cloud_snapshots`.
+
+## 5. Next Phase — A Mode (Dua) & B Mode (Dua Work) Upgrade Roadmap
+
+This phase separates the fast control plane (**A Mode — Dua**) from isolated execution (**B Mode — Dua Work**) in place on the existing `dua-api`, `dua-ai-engine`, and Supabase codebase. Ordered PRs:
+
+### PR K8: Security Hardening
+
+- Auth rate limiting on `/api/account/email-login` and `/api/account/email-signup` (and sibling auth endpoints) in `apps/api/src/core/account.mjs`.
+- HTTP security headers (`X-Content-Type-Options`, `X-Frame-Options`, `Strict-Transport-Security`) in `apps/api/src/server/server.mjs` and `apps/api/src/server/service-handler.mjs`.
+- Fix cookie `.split('=')` parsing to `indexOf('=')` in `apps/api/src/core/account.mjs` and `apps/api/src/server/service-handler.mjs`.
+- *Current baseline:* PR #45 (`fix/security-hardening`) already landed `authRateLimiter` in `account.mjs`, `readCookies` (`indexOf('=')`) in `account.mjs` and `service-handler.mjs`, and `X-Content-Type-Options` / `X-Frame-Options` (plus `Referrer-Policy`, `Content-Security-Policy`, and `Permissions-Policy`) in `server.mjs` / `service-handler.mjs`; adding `Strict-Transport-Security` (when appropriate behind TLS/proxy configuration) remains pending.
+
+### PR K9: Safe `archive/` Cleanup
+
+- Follow `AGENTS.md` Archive Rules: move inactive items to `archive/` with archive notes (never permanently delete) only after checking all imports, routes, tests, deploy scripts, and docs.
+- **Explicitly KEEP ACTIVE (do NOT archive):**
+  - `apps/api/src/core/orhan-tasks.mjs` and `dua_orhan_tasks` (active Dua Work task backend).
+  - `apps/api/src/core/workflow-worker.mjs` and `apps/api/src/core/workflow-runtime.mjs` (active K6 proactive trigger worker).
+- **Safe-to-archive candidates (after reference checks):**
+  - Duplicate `apps/api/src/core/dua_agent_prompts.json` (keep `apps/ai-engine/dua_engine/agent/dua_agent_prompts.json` as single source of truth; check `apps/api/deploy-cloudrun.sh` copy step and `apps/api/src/core/agents-skills.mjs` lookup first).
+  - `apps/ai-engine/dua-adk-cloudshell.sh`
+  - `apps/ai-engine/adk_examples/`
+  - `apps/ai-engine/backup.py`
+  - Legacy `apps/api/src/core/cloud-snapshot.mjs` only after confirming Android no longer calls `/api/cloud`.
+
+### PR K10: Strict Control Plane — Dua (A Mode)
+
+- Lightweight intent classifier (`direct_reply` vs task creation).
+- Keep the 4 canonical control-plane actions (`direct_reply`, `create_task`, `get_task_status`, `stop_task`).
+- Ensure A Mode stays read-only/coordination-only without direct shell or arbitrary code execution.
+
+### PR K11: Task Orchestrator & Live Events
+
+- Extend the existing Dua Work task lifecycle (`queued` -> `running` -> `completed` / `failed` / `stopped` / `timed_out`, optional `provisioning` state) with `dua_task_events` progress streaming (SSE), `continue_thread_id`, worker heartbeats, timeout handling, and strict idempotency.
+
+### PR K12: Isolated Execution Plane — Dua Work (B Mode) & Tool Registry
+
+- Separate isolated sandbox worker (Cloud Run Jobs or dedicated Docker host with CPU/RAM/disk/timeout limits).
+- Strict Tool Registry (schema, permission level, timeout, network policy; starting with `run_command`, `read_file`, `write_file`).
+- Scoped task tokens (execution workers never receive `SUPABASE_SERVICE_ROLE_KEY`).
+
+### PR K13: Context Packer & Artifact Delivery
+
+- Add a `context_packer` module so B Mode receives only relevant packed context (request, scoped `dua_memories`, constraints, selected files) instead of full raw chat dumps.
+- Store task outputs in `dua_artifacts` + Supabase Storage while returning clean summaries and artifact links to chat.

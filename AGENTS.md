@@ -113,6 +113,9 @@ Recommended statuses:
 - Prevent unauthorized task access.
 - Apply timeouts and resource limits to execution work.
 - Keep execution work isolated from the chat/control plane.
+- Never give `Dua Work` execution workers `SUPABASE_SERVICE_ROLE_KEY` or unrestricted database/server access; use scoped task tokens only.
+- Define every execution tool through a Tool Registry with explicit input/output schema, permission level, timeout, and network policy.
+- Use a Context Packer when passing context from `Dua` (control plane) to `Dua Work` (execution plane) instead of dumping full raw conversation history.
 
 ## Testing Requirements
 

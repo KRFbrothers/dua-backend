@@ -68,6 +68,8 @@ In this repository the actions map onto existing `dua-api` routes. Tasks are Dua
 
 All task routes need the signed-in owner's Bearer token, and a task that belongs to someone else is `404`.
 
+For the next-phase A Mode (`Dua`) + B Mode (`Dua Work`) upgrade roadmap — covering security hardening, safe `archive/` cleanup, isolated sandbox worker execution, the Tool Registry, and the Context Packer — see Section 5 of [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md).
+
 ## Task Lifecycle
 
 A task should move through a predictable lifecycle:
