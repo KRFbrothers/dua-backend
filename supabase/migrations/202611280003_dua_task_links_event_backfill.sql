@@ -9,7 +9,11 @@
 -- timed out states depend on them. That is why the file is marked NO in
 -- `ROLLBACK_STATUS.md`.
 --
--- This file is forward fix item 6 from `docs/FORWARD_FIX_PLAN_NO_ROLLBACK.md`.
+-- This file is forward fix item 4 from `docs/FORWARD_FIX_PLAN_NO_ROLLBACK.md`.
+-- (The plan numbers the three lifecycle values item 4 and the five lineage
+-- values item 6. An earlier revision of this header had the two swapped.)
+-- Comment only correction: this file is already applied, so nothing below
+-- this header changes. No schema change.
 -- It copies the three values into `dua_task_events.detail` for every task that
 -- already has them, so the columns become a cache and a later drop is
 -- recoverable from the event stream.
