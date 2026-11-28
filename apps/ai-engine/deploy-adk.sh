@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Plan is read-only. Deploy stages at 0% traffic; promotion/rollback are explicit.
 set -euo pipefail
+export MSYS_NO_PATHCONV=1
 adk_project="${PROJECT_ID:-global-healer-m6shk}"
 adk_region="${REGION:-us-central1}"
 adk_service="${SERVICE:-dua-ai-engine}"

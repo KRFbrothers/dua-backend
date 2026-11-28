@@ -102,6 +102,28 @@ test('production access policy fails closed without an owner email (no open acce
   assert.equal(local.allowed, true);
 });
 
+test('makeServer forwards health probes to handleService', async () => {
+  const server = makeServer({ env: {}, supabaseUrl: '', supabaseKey: '', fetcher: () => { throw new Error('no network expected'); } }).listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  try {
+    const port = server.address().port;
+    const health = await fetch(`http://127.0.0.1:${port}/healthz`);
+    assert.equal(health.status, 200);
+    assert.equal((await health.json()).status, 'ok');
+    assert.equal(health.headers.get('strict-transport-security'), 'max-age=31536000; includeSubDomains');
+    assert.equal(health.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(health.headers.get('x-frame-options'), 'DENY');
+    const ready = await fetch(`http://127.0.0.1:${port}/readyz`);
+    assert.notEqual(ready.status, 404);
+    assert.equal(ready.status, 503);
+    assert.equal((await ready.json()).status, 'not_ready');
+    assert.equal(ready.headers.get('strict-transport-security'), 'max-age=31536000; includeSubDomains');
+    assert.equal(ready.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(ready.headers.get('x-frame-options'), 'DENY');
+    assert.equal(ready.headers.get('referrer-policy'), 'no-referrer');
+  } finally { server.close(); }
+});
+
 test('local server streams chunks to the client as they are produced', async () => {
   const fetcher = mockFetch(sseResponse(geminiChunks(['One ', 'two ', 'three']), { delayMs: 75 }));
   const server = makeServer({ env: { ...env }, key: env.GEMINI_API_KEY, model: env.GEMINI_MODEL, fetcher, supabaseUrl: '', supabaseKey: '' }).listen(0, '127.0.0.1');

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Deploy only the Node API. No .env is loaded, no secret value is read by this script.
 set -euo pipefail
+export MSYS_NO_PATHCONV=1
 
 : "${PROJECT_ID:?Set PROJECT_ID to your Google Cloud project ID}"
 if [[ ! "$PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]]; then
