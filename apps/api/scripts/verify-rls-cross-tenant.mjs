@@ -42,6 +42,9 @@ export const RPC_ONLY_TABLES = Object.freeze([
 // service role and only the read isolation (S2) is checked.
 export const SELECT_ONLY_TABLES = Object.freeze([
   'dua_cloud_snapshots', 'dua_workflow_executions', 'dua_workflow_automation',
+  // Written only by the security definer trigger on dua_memories, so the owner
+  // has a select policy and no insert, update or delete path through PostgREST.
+  'dua_memories_scope_history',
 ]);
 
 // Tables with no owner_id at all. Listed so the report can say they were considered and skipped.

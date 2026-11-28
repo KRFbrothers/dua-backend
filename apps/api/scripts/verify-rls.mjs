@@ -14,6 +14,8 @@ export const DEFAULT_TABLES = Object.freeze([
   'dua_task_events', 'dua_workers',
   // Function definition history: infrastructure only, service_role access.
   'dua_function_history',
+  // Append-only memory scope history, written only by a security definer trigger.
+  'dua_memories_scope_history',
 ]);
 const fail = reason => ({ ok: false, reason });
 function configuration(env) {
