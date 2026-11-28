@@ -24,6 +24,11 @@ const DETAIL_KEYS = new Set([
   // writes it into dua_task_events.detail, so a reader can query one name for both
   // backfilled rows and rows the API writes from now on.
   'parent_task_id', 'root_task_id', 'continue_thread_id', 'idempotency_key',
+  // Task lifecycle, spelled exactly as 202611280003_dua_task_links_event_backfill.sql
+  // writes it into dua_task_events.detail, so the three columns added by
+  // 202611250001_dua_orhan_tasks_lifecycle.sql become a cache: a reader can recover
+  // why a task ended and when from the event stream alone.
+  'end_reason', 'finished_at_ms', 'stopped_at_ms',
 ]);
 
 function safeDetail(detail) {

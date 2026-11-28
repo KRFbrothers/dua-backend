@@ -138,3 +138,50 @@ test('the exported event list matches the migration check constraint', () => {
     'started', 'step_completed', 'step_failed', 'step_started', 'timed_out',
   ]);
 });
+
+test('the three lifecycle keys survive safeDetail, so the trail can answer why and when', async () => {
+  const db = fakeDb();
+  const append = createTaskEventWriter({ db, ownerId: OWNER, taskId: TASK });
+  await append('failed', {
+    toStatus: 'failed', endReason: 'error',
+    end_reason: 'timeout', finished_at_ms: 1764000000000, stopped_at_ms: 1764000000001,
+  });
+  const detail = db.inserts[0].detail;
+  assert.deepEqual(Object.keys(detail).sort(), [
+    'endReason', 'end_reason', 'finished_at_ms', 'stopped_at_ms', 'toStatus',
+  ]);
+  assert.equal(detail.end_reason, 'timeout');
+  assert.equal(detail.finished_at_ms, 1764000000000);
+  assert.equal(detail.stopped_at_ms, 1764000000001);
+});
+
+test('the lifecycle keys do not open the allowlist: unknown keys are still dropped', async () => {
+  const db = fakeDb();
+  const append = createTaskEventWriter({ db, ownerId: OWNER, taskId: TASK });
+  await append('failed', {
+    end_reason: 'error',
+    finishedAtMs: 'camelCase is not the backfilled name',
+    stoppedAtMs: 'camelCase is not the backfilled name',
+    endReasonText: 'not a real key',
+    prompt: 'secret user prompt',
+    output: 'secret model output',
+    apiKey: 'sk-secret',
+  });
+  const detail = db.inserts[0].detail;
+  assert.deepEqual(Object.keys(detail), ['end_reason']);
+  assert.ok(!JSON.stringify(db.inserts).includes('secret'));
+});
+
+test('a null lifecycle value is skipped, so an event without one keeps its old detail', async () => {
+  const db = fakeDb();
+  const append = createTaskEventWriter({ db, ownerId: OWNER, taskId: TASK });
+  await append('completed', { toStatus: 'completed', end_reason: undefined, finished_at_ms: undefined, stopped_at_ms: undefined });
+  assert.deepEqual(Object.keys(db.inserts[0].detail), ['toStatus']);
+});
+
+test('a non-finite lifecycle timestamp is dropped, not stored as NaN', async () => {
+  const db = fakeDb();
+  const append = createTaskEventWriter({ db, ownerId: OWNER, taskId: TASK });
+  await append('failed', { finished_at_ms: Number.NaN, stopped_at_ms: Number.POSITIVE_INFINITY, end_reason: 'error' });
+  assert.deepEqual(Object.keys(db.inserts[0].detail), ['end_reason']);
+});

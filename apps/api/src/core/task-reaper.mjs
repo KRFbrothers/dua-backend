@@ -61,7 +61,14 @@ export async function reapOnce({ env = process.env, fetcher = fetch, signal, max
   // Append one 'reaped' event per task. A failure here is logged, never thrown.
   for (const row of reaped) {
     const append = createTaskEventWriter({ db, ownerId: row.owner_id, taskId: row.task_id, signal });
-    const ok = await append('reaped', { endReason: 'timeout', fromStatus: 'running', toStatus: 'failed' });
+    // The RPC returns the full task row, so the three lifecycle values it just wrote go
+    // into the event detail too, spelled as 202611280003 backfilled them.
+    const ok = await append('reaped', {
+      endReason: 'timeout', fromStatus: 'running', toStatus: 'failed',
+      end_reason: row.end_reason || undefined,
+      finished_at_ms: Number(row.finished_at_ms) || undefined,
+      stopped_at_ms: Number(row.stopped_at_ms) || undefined,
+    });
     if (!ok) log('reaper_event_failed', { taskId: row.task_id });
   }
   if (reaped.length) log('reaped', { count: reaped.length });
