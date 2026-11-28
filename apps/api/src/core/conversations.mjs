@@ -16,7 +16,7 @@
 import { readJsonLimited } from './limited-json.mjs';
 import { resolveOwner, StorageError } from './storage.mjs';
 import { loadPrivacySafeMemories, formatMemories, triggerMemoryAutoExtraction } from './artifacts-memories.mjs';
-import { OFFICIAL_AGENTS } from './agents-skills.mjs';
+import { LEGACY_CONVERSATION_AGENT_ID, OFFICIAL_AGENTS } from './agents-skills.mjs';
 
 const noStore = (error, status) => Response.json({ error }, { status, headers: { 'Cache-Control': 'no-store' } });
 const ok = (body, status = 200) => Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -360,8 +360,7 @@ export function parseMentions(text, candidates = []) {
  */
 export async function loadAvailableAgents({ base, headers, ownerId, fetcher = fetch, signal = null }) {
   const official = [
-    { id: 'personal-agent', name: 'Personal Agent', mode: 'auto', systemPrompt: '' },
-    { id: 'dua-agent', name: 'Dua Agent', mode: 'agent', systemPrompt: '' },
+    { id: 'dua-work', name: 'Dua Work', mode: 'agent', systemPrompt: '' },
   ];
   const officialOnly = () => Object.defineProperty([...official], 'customUnavailable', { value: true });
   if (!base || !headers || !ownerId) return officialOnly();
@@ -452,7 +451,7 @@ export async function prepareConversationChat(request, data, { env = process.env
   }
   const conv = convRows[0];
   const requestedAgentId = data.agent_id || data.agentId || null;
-  const primaryFallbackAgentId = requestedAgentId || conv.agent_id || 'dua-agent';
+  const primaryFallbackAgentId = requestedAgentId || conv.agent_id || 'dua-work';
 
   // Phase 3: inject privacy-safe memories into data.memory for context.
   // Loads 'global' + 'group:<conversationId>' memories; never leaks other threads.
@@ -487,7 +486,10 @@ export async function prepareConversationChat(request, data, { env = process.env
   } catch {}
 
   const availableAgents = await loadAvailableAgents({ base, headers, ownerId: owner.user.id, fetcher, signal: request.signal });
-  if (requestedAgentId && !availableAgents.some(agent => agent.id === requestedAgentId)) {
+  // A row still stored as dua-agent is not an unknown agent, even when the client repeats that id.
+  const legacyStoredAgent = requestedAgentId === LEGACY_CONVERSATION_AGENT_ID
+    && conv.agent_id === LEGACY_CONVERSATION_AGENT_ID;
+  if (requestedAgentId && !legacyStoredAgent && !availableAgents.some(agent => agent.id === requestedAgentId)) {
     // A custom agent cannot be confirmed while dua_agents is unreadable: retryable, not the caller's fault.
     if (availableAgents.customUnavailable) {
       throw Object.assign(new Error(`${FEATURE} are temporarily unavailable. Retry.`), { status: 503 });

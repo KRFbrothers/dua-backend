@@ -173,9 +173,13 @@ test('starter skills load from dua_agent_prompts.json and official agents are de
   const starterIds = starters.map(s => s.id);
   assert.deepEqual(starterIds, ['frontend-developer', 'backend-architect', 'api-tester', 'devops-automator', 'code-reviewer']);
 
-  assert.equal(OFFICIAL_AGENTS.length, 2);
-  assert.equal(OFFICIAL_AGENTS[0].id, 'personal-agent');
-  assert.equal(OFFICIAL_AGENTS[1].id, 'dua-agent');
+  assert.equal(OFFICIAL_AGENTS.length, 1);
+  assert.equal(OFFICIAL_AGENTS[0].id, 'dua-work');
+  assert.equal(OFFICIAL_AGENTS[0].name, 'Dua Work');
+  assert.equal(OFFICIAL_AGENTS[0].description, 'Fast everyday chat, tools, skills, and multi-step execution.');
+  assert.equal(OFFICIAL_AGENTS[0].mode, 'agent');
+  assert.equal(OFFICIAL_AGENTS[0].pinned, true);
+  assert.equal(OFFICIAL_AGENTS[0].isOfficial, true);
 
   assert.ok(SLUG_REGEX.test('frontend-developer'));
   assert.ok(SLUG_REGEX.test('my-agent-1'));
@@ -190,11 +194,11 @@ test('GET /api/agents returns official agents merged with custom agents', async 
   const res = await handleService(call('GET', '/api/agents'), { env, fetcher });
   assert.equal(res.status, 200);
   const data = await res.json();
-  assert.equal(data.agents.length, 2);
-  assert.equal(data.agents[0].id, 'personal-agent');
-  assert.equal(data.agents[1].id, 'dua-agent');
+  assert.equal(data.agents.length, 1);
+  assert.equal(data.agents[0].id, 'dua-work');
+  assert.equal(data.agents[0].name, 'Dua Work');
   assert.equal(data.agents[0].isOfficial, true);
-  assert.equal(data.agents[1].isOfficial, true);
+  assert.equal(data.agents[0].pinned, true);
 });
 
 test('POST /api/agents creates a custom agent and rejects invalid or official ids', async () => {
@@ -202,7 +206,7 @@ test('POST /api/agents creates a custom agent and rejects invalid or official id
   const fetcher = router(db.routes);
 
   // Reject official id
-  const badOfficial = await handleService(call('POST', '/api/agents', { id: 'personal-agent', name: 'Fake' }), { env, fetcher });
+  const badOfficial = await handleService(call('POST', '/api/agents', { id: 'dua-work', name: 'Fake' }), { env, fetcher });
   assert.equal(badOfficial.status, 400);
 
   // Reject invalid mode
@@ -222,9 +226,9 @@ test('POST /api/agents creates a custom agent and rejects invalid or official id
   assert.equal(created.id, 'code-reviewer-pro');
   assert.equal(created.isOfficial, false);
 
-  // GET /api/agents now has 3 agents
+  // GET /api/agents now has the official agent plus the custom one
   const list = await (await handleService(call('GET', '/api/agents'), { env, fetcher })).json();
-  assert.equal(list.agents.length, 3);
+  assert.equal(list.agents.length, 2);
 });
 
 test('GET /api/agents/:id returns agent details or 404', async () => {
@@ -232,9 +236,9 @@ test('GET /api/agents/:id returns agent details or 404', async () => {
   const fetcher = router(db.routes);
 
   // Official agent returns without DB record
-  const official = await handleService(call('GET', '/api/agents/dua-agent'), { env, fetcher });
+  const official = await handleService(call('GET', '/api/agents/dua-work'), { env, fetcher });
   assert.equal(official.status, 200);
-  assert.equal((await official.json()).agent.id, 'dua-agent');
+  assert.equal((await official.json()).agent.id, 'dua-work');
 
   // Unknown agent returns 404
   const unknown = await handleService(call('GET', '/api/agents/unknown-agent'), { env, fetcher });
@@ -246,17 +250,17 @@ test('PUT and DELETE /api/agents/:id respects official protection', async () => 
   const fetcher = router(db.routes);
 
   // Official agent cannot be deleted
-  const delOfficial = await handleService(call('DELETE', '/api/agents/dua-agent'), { env, fetcher });
+  const delOfficial = await handleService(call('DELETE', '/api/agents/dua-work'), { env, fetcher });
   assert.equal(delOfficial.status, 400);
 
   // Official agent can be customized via PUT
-  const putOfficial = await handleService(call('PUT', '/api/agents/dua-agent', {
-    description: 'Customized Dua Agent',
+  const putOfficial = await handleService(call('PUT', '/api/agents/dua-work', {
+    description: 'Customized Dua Work',
     systemPrompt: 'Be super helpful.'
   }), { env, fetcher });
   assert.equal(putOfficial.status, 200);
   const updatedOfficial = (await putOfficial.json()).agent;
-  assert.equal(updatedOfficial.description, 'Customized Dua Agent');
+  assert.equal(updatedOfficial.description, 'Customized Dua Work');
   assert.equal(updatedOfficial.systemPrompt, 'Be super helpful.');
 
   // Custom agent create, update, delete
@@ -369,42 +373,42 @@ test('Phase 4C: Proactive Agents — Instructions CRUD (GET, POST, PUT, DELETE)'
   const fetcher = router(db.routes);
 
   // 1. POST instruction
-  const postRes = await handleService(call('POST', '/api/agents/personal-agent/instructions', {
+  const postRes = await handleService(call('POST', '/api/agents/dua-work/instructions', {
     instruction: 'Always format Kotlin code with official style guidelines',
     isActive: true,
   }), { env, fetcher });
   assert.equal(postRes.status, 201);
   const { instruction } = await postRes.json();
   assert.ok(instruction.id);
-  assert.equal(instruction.agentId, 'personal-agent');
+  assert.equal(instruction.agentId, 'dua-work');
   assert.equal(instruction.instruction, 'Always format Kotlin code with official style guidelines');
   assert.equal(instruction.isActive, true);
 
   // 2. GET instructions list
-  const listRes = await handleService(call('GET', '/api/agents/personal-agent/instructions'), { env, fetcher });
+  const listRes = await handleService(call('GET', '/api/agents/dua-work/instructions'), { env, fetcher });
   assert.equal(listRes.status, 200);
   const listJson = await listRes.json();
   assert.equal(listJson.instructions.length, 1);
   assert.equal(listJson.instructions[0].id, instruction.id);
 
   // 3. GET single instruction
-  const getSingle = await handleService(call('GET', `/api/agents/personal-agent/instructions/${instruction.id}`), { env, fetcher });
+  const getSingle = await handleService(call('GET', `/api/agents/dua-work/instructions/${instruction.id}`), { env, fetcher });
   assert.equal(getSingle.status, 200);
   assert.equal((await getSingle.json()).instruction.id, instruction.id);
 
   // 4. PUT instruction (deactivate)
-  const putRes = await handleService(call('PUT', `/api/agents/personal-agent/instructions/${instruction.id}`, {
+  const putRes = await handleService(call('PUT', `/api/agents/dua-work/instructions/${instruction.id}`, {
     isActive: false,
   }), { env, fetcher });
   assert.equal(putRes.status, 200);
   assert.equal((await putRes.json()).instruction.isActive, false);
 
   // 5. DELETE instruction
-  const delRes = await handleService(call('DELETE', `/api/agents/personal-agent/instructions/${instruction.id}`), { env, fetcher });
+  const delRes = await handleService(call('DELETE', `/api/agents/dua-work/instructions/${instruction.id}`), { env, fetcher });
   assert.equal(delRes.status, 204);
 
   // 6. Verify empty list
-  const emptyList = await handleService(call('GET', '/api/agents/personal-agent/instructions'), { env, fetcher });
+  const emptyList = await handleService(call('GET', '/api/agents/dua-work/instructions'), { env, fetcher });
   assert.equal(emptyList.status, 200);
   assert.equal((await emptyList.json()).instructions.length, 0);
 });
@@ -414,7 +418,7 @@ test('Phase 4C: Proactive Agents — Triggers CRUD & Run (GET, POST, PUT, DELETE
   const fetcher = router(db.routes);
 
   // 1. POST trigger
-  const postRes = await handleService(call('POST', '/api/agents/dua-agent/triggers', {
+  const postRes = await handleService(call('POST', '/api/agents/dua-work/triggers', {
     triggerType: 'schedule',
     cronExpr: '0 9 * * 1-5',
     prompt: 'Summarize unread GitHub PRs and morning tasks',
@@ -423,7 +427,7 @@ test('Phase 4C: Proactive Agents — Triggers CRUD & Run (GET, POST, PUT, DELETE
   assert.equal(postRes.status, 201);
   const { trigger } = await postRes.json();
   assert.ok(trigger.id);
-  assert.equal(trigger.agentId, 'dua-agent');
+  assert.equal(trigger.agentId, 'dua-work');
   assert.equal(trigger.triggerType, 'schedule');
   assert.equal(trigger.cronExpr, '0 9 * * 1-5');
   assert.equal(trigger.prompt, 'Summarize unread GitHub PRs and morning tasks');
@@ -431,19 +435,19 @@ test('Phase 4C: Proactive Agents — Triggers CRUD & Run (GET, POST, PUT, DELETE
   assert.equal(trigger.lastRunAt, null);
 
   // 2. GET triggers list
-  const listRes = await handleService(call('GET', '/api/agents/dua-agent/triggers'), { env, fetcher });
+  const listRes = await handleService(call('GET', '/api/agents/dua-work/triggers'), { env, fetcher });
   assert.equal(listRes.status, 200);
   const listJson = await listRes.json();
   assert.equal(listJson.triggers.length, 1);
   assert.equal(listJson.triggers[0].id, trigger.id);
 
   // 3. GET single trigger
-  const getSingle = await handleService(call('GET', `/api/agents/dua-agent/triggers/${trigger.id}`), { env, fetcher });
+  const getSingle = await handleService(call('GET', `/api/agents/dua-work/triggers/${trigger.id}`), { env, fetcher });
   assert.equal(getSingle.status, 200);
   assert.equal((await getSingle.json()).trigger.id, trigger.id);
 
   // 4. PUT trigger (update cron and prompt)
-  const putRes = await handleService(call('PUT', `/api/agents/dua-agent/triggers/${trigger.id}`, {
+  const putRes = await handleService(call('PUT', `/api/agents/dua-work/triggers/${trigger.id}`, {
     cronExpr: '0 10 * * 1-5',
     prompt: 'Updated morning summary',
   }), { env, fetcher });
@@ -453,7 +457,7 @@ test('Phase 4C: Proactive Agents — Triggers CRUD & Run (GET, POST, PUT, DELETE
   assert.equal(updatedTrigger.prompt, 'Updated morning summary');
 
   // 5. POST run trigger manually
-  const runRes = await handleService(call('POST', `/api/agents/dua-agent/triggers/${trigger.id}/run`), { env: workflowEnv, fetcher });
+  const runRes = await handleService(call('POST', `/api/agents/dua-work/triggers/${trigger.id}/run`), { env: workflowEnv, fetcher });
   assert.equal(runRes.status, 200);
   const runJson = await runRes.json();
   assert.equal(runJson.triggered, true);
@@ -463,11 +467,11 @@ test('Phase 4C: Proactive Agents — Triggers CRUD & Run (GET, POST, PUT, DELETE
   assert.ok(runJson.runId);
 
   // 6. DELETE trigger
-  const delRes = await handleService(call('DELETE', `/api/agents/dua-agent/triggers/${trigger.id}`), { env, fetcher });
+  const delRes = await handleService(call('DELETE', `/api/agents/dua-work/triggers/${trigger.id}`), { env, fetcher });
   assert.equal(delRes.status, 204);
 
   // 7. Verify empty list
-  const emptyList = await handleService(call('GET', '/api/agents/dua-agent/triggers'), { env, fetcher });
+  const emptyList = await handleService(call('GET', '/api/agents/dua-work/triggers'), { env, fetcher });
   assert.equal(emptyList.status, 200);
   assert.equal((await emptyList.json()).triggers.length, 0);
 });
@@ -513,9 +517,9 @@ test('K6: trigger run queues a real agent run for the worker and sends no push a
 test('K6: trigger run needs the workflow worker flag and never enqueues without it', async () => {
   const db = database();
   const fetcher = router(db.routes);
-  const created = await handleService(call('POST', '/api/agents/dua-agent/triggers', { triggerType: 'webhook', prompt: 'Pending summary' }), { env, fetcher });
+  const created = await handleService(call('POST', '/api/agents/dua-work/triggers', { triggerType: 'webhook', prompt: 'Pending summary' }), { env, fetcher });
   const { trigger } = await created.json();
-  const res = await handleService(call('POST', `/api/agents/dua-agent/triggers/${trigger.id}/run`), { env, fetcher });
+  const res = await handleService(call('POST', `/api/agents/dua-work/triggers/${trigger.id}/run`), { env, fetcher });
   assert.equal(res.status, 503);
   assert.equal(db.enqueued.length, 0);
   assert.equal(db.notifications.length, 0);
@@ -531,18 +535,18 @@ test('Phase 4C: Proactive Agents — Validation & 404s for nonexistent agents or
   assert.equal(noAgent.status, 404);
 
   // Empty instruction -> 400
-  const emptyInst = await handleService(call('POST', '/api/agents/personal-agent/instructions', { instruction: '   ' }), { env, fetcher });
+  const emptyInst = await handleService(call('POST', '/api/agents/dua-work/instructions', { instruction: '   ' }), { env, fetcher });
   assert.equal(emptyInst.status, 400);
 
   // Invalid triggerType -> 400
-  const badTriggerType = await handleService(call('POST', '/api/agents/personal-agent/triggers', {
+  const badTriggerType = await handleService(call('POST', '/api/agents/dua-work/triggers', {
     triggerType: 'invalid_type',
     prompt: 'Do something',
   }), { env, fetcher });
   assert.equal(badTriggerType.status, 400);
 
   // Schedule trigger without cronExpr -> 400
-  const noCron = await handleService(call('POST', '/api/agents/personal-agent/triggers', {
+  const noCron = await handleService(call('POST', '/api/agents/dua-work/triggers', {
     triggerType: 'schedule',
     prompt: 'Do something',
   }), { env, fetcher });
@@ -550,6 +554,6 @@ test('Phase 4C: Proactive Agents — Validation & 404s for nonexistent agents or
 
   // Nonexistent trigger run -> 404
   const fakeId = '00000000-0000-0000-0000-000000000000';
-  const badRun = await handleService(call('POST', `/api/agents/personal-agent/triggers/${fakeId}/run`), { env, fetcher });
+  const badRun = await handleService(call('POST', `/api/agents/dua-work/triggers/${fakeId}/run`), { env, fetcher });
   assert.equal(badRun.status, 404);
 });

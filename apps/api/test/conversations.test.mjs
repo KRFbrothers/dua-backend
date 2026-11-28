@@ -170,13 +170,13 @@ test('conversations: create, list, pin and delete round-trip with the documented
   const db = database();
   const fetcher = router(db.routes);
 
-  const created = await handleService(call('POST', '/api/conversations', { title: '  Trip plan  ', agentId: 'personal-agent' }), { env, fetcher });
+  const created = await handleService(call('POST', '/api/conversations', { title: '  Trip plan  ', agentId: 'dua-work' }), { env, fetcher });
   assert.equal(created.status, 201);
   assert.equal(created.headers.get('cache-control'), 'no-store');
   const { conversation } = await created.json();
   assert.deepEqual(Object.keys(conversation).sort(), ['agentId', 'createdAt', 'id', 'lastMessageAt', 'lastMessagePreview', 'pinned', 'title']);
   assert.equal(conversation.title, 'Trip plan');
-  assert.equal(conversation.agentId, 'personal-agent');
+  assert.equal(conversation.agentId, 'dua-work');
   assert.equal(conversation.pinned, false);
   assert.equal(db.conversations[0].owner_id, UID);
 
@@ -416,7 +416,7 @@ test('validateChat validates conversation_id, conversationId, agent_id and confl
   assert.equal(validateChat({ ...base, conversationId: C1.toUpperCase() }), null);
   assert.equal(validateChat({ ...base, conversation_id: 'bad-id' })?.[0], 'Invalid conversation_id.');
   assert.equal(validateChat({ ...base, conversationId: '123' })?.[0], 'Invalid conversation_id.');
-  assert.equal(validateChat({ ...base, agent_id: 'personal-agent' }), null);
+  assert.equal(validateChat({ ...base, agent_id: 'dua-work' }), null);
   assert.equal(validateChat({ ...base, agentId: 'dua-agent' }), null);
   assert.equal(validateChat({ ...base, agent_id: 'Invalid Agent!' })?.[0], 'Invalid agent_id.');
   assert.equal(validateChat({ ...base, conversation_id: C1, persistence: {} })?.[0], 'Choose conversation_id or persistence, not both.');
@@ -490,7 +490,7 @@ test('POST /api/chat with conversation_id persists user turn before stream and a
 
 test('POST /api/chat with conversation_id persists both turns in non-streaming mode', async () => {
   const db = database();
-  const conv = db.addConversation({ id: C2, title: 'Quick Q', agent_id: 'personal-agent' });
+  const conv = db.addConversation({ id: C2, title: 'Quick Q', agent_id: 'dua-work' });
   const geminiRoutes = [
     [url => url.includes(':generateContent'), () => Response.json({
       candidates: [{ content: { parts: [{ text: 'Direct answer.' }] }, finishReason: 'STOP' }],
@@ -516,7 +516,7 @@ test('POST /api/chat with conversation_id persists both turns in non-streaming m
   assert.equal(db.messages[0].content, 'Quick question?');
   assert.equal(db.messages[1].role, 'assistant');
   assert.equal(db.messages[1].content, 'Direct answer.');
-  assert.equal(db.messages[1].agent_id, 'personal-agent');
+  assert.equal(db.messages[1].agent_id, 'dua-work');
   assert.equal(conv.last_message_preview, 'Direct answer.');
 });
 
@@ -570,16 +570,16 @@ test('POST /api/chat stream failure keeps user message but skips assistant messa
 
 test('Phase 4A: parseMentions correctly extracts agent IDs and names', () => {
   const candidates = [
-    { id: 'personal-agent', name: 'Personal Agent' },
+    { id: 'dua-work', name: 'Dua Work' },
     { id: 'dua-agent', name: 'Dua Agent' },
     { id: 'code-assistant', name: 'Code Assistant' },
     { id: 'frontend-dev', name: 'Frontend Developer' },
   ];
 
   // Matches @slug and @Name case-insensitively
-  const r1 = parseMentions('Hello @personal-agent and @CodeAssistant please review', candidates);
+  const r1 = parseMentions('Hello @dua-work and @CodeAssistant please review', candidates);
   assert.equal(r1.length, 2);
-  assert.equal(r1[0].id, 'personal-agent');
+  assert.equal(r1[0].id, 'dua-work');
   assert.equal(r1[1].id, 'code-assistant');
 
   // Matches @Name without hyphens/spaces
@@ -616,10 +616,10 @@ test('Phase 4A: /api/conversations/:id/agents CRUD round-trip', async () => {
   assert.deepEqual((await emptyRes.json()).agents, []);
 
   // 2. Add an official agent
-  const addRes1 = await handleService(call('POST', `/api/conversations/${conv.id}/agents`, { agentId: 'personal-agent' }), { env, fetcher });
+  const addRes1 = await handleService(call('POST', `/api/conversations/${conv.id}/agents`, { agentId: 'dua-work' }), { env, fetcher });
   assert.equal(addRes1.status, 201);
   const { agent: agent1 } = await addRes1.json();
-  assert.equal(agent1.agentId, 'personal-agent');
+  assert.equal(agent1.agentId, 'dua-work');
   assert.equal(agent1.conversationId, conv.id);
 
   // 3. Add a custom agent that exists in dua_agents
@@ -636,7 +636,7 @@ test('Phase 4A: /api/conversations/:id/agents CRUD round-trip', async () => {
   assert.equal(listRes.status, 200);
   const { agents } = await listRes.json();
   assert.equal(agents.length, 2);
-  assert.deepEqual(agents.map(a => a.agentId), ['personal-agent', 'code-helper']);
+  assert.deepEqual(agents.map(a => a.agentId), ['dua-work', 'code-helper']);
 
   // 6. Delete agent from conversation
   const delRes = await handleService(call('DELETE', `/api/conversations/${conv.id}/agents/code-helper`), { env, fetcher });
@@ -653,10 +653,10 @@ test('Phase 4A: /api/conversations/:id/agents CRUD round-trip', async () => {
 
 test('Phase 4A: Multi-Agent streaming chat tags events with agentId and saves turns', async () => {
   const db = database();
-  const conv = db.addConversation({ id: C1, agent_id: 'personal-agent' });
-  // Add a second agent to the conversation
-  db.addConversationAgent(conv.id, 'personal-agent');
-  db.addConversationAgent(conv.id, 'dua-agent');
+  const conv = db.addConversation({ id: C1, agent_id: 'dua-work' });
+  db.customAgents.push({ id: 'code-helper', owner_id: UID, name: 'Code Helper', mode: 'auto', system_prompt: '' });
+  db.addConversationAgent(conv.id, 'dua-work');
+  db.addConversationAgent(conv.id, 'code-helper');
 
   const geminiRoutes = [
     [url => url.includes(':streamGenerateContent'), () => sseResponse([
@@ -669,7 +669,7 @@ test('Phase 4A: Multi-Agent streaming chat tags events with agentId and saves tu
   // User mentions both agents in the prompt
   const response = await handleService(call('POST', '/api/chat', {
     model: 'Dua',
-    messages: [{ role: 'user', text: '@PersonalAgent and @DuaAgent please give your views' }],
+    messages: [{ role: 'user', text: '@DuaWork and @CodeHelper please give your views' }],
     conversation_id: conv.id,
     stream: true,
   }), { env, fetcher });
@@ -681,13 +681,13 @@ test('Phase 4A: Multi-Agent streaming chat tags events with agentId and saves tu
   // Verify tagged events
   const textEvents = events.filter(e => e.type === 'text');
   assert.ok(textEvents.length >= 2, 'Expected text events from multiple agents');
-  assert.ok(textEvents.some(e => e.agentId === 'personal-agent'));
-  assert.ok(textEvents.some(e => e.agentId === 'dua-agent'));
+  assert.ok(textEvents.some(e => e.agentId === 'dua-work'));
+  assert.ok(textEvents.some(e => e.agentId === 'code-helper'));
 
   const agentDoneEvents = events.filter(e => e.type === 'agent_done');
   assert.equal(agentDoneEvents.length, 2);
-  assert.ok(agentDoneEvents.some(e => e.agentId === 'personal-agent'));
-  assert.ok(agentDoneEvents.some(e => e.agentId === 'dua-agent'));
+  assert.ok(agentDoneEvents.some(e => e.agentId === 'dua-work'));
+  assert.ok(agentDoneEvents.some(e => e.agentId === 'code-helper'));
 
   // Final stream done
   assert.ok(events.some(e => e.type === 'done'));
@@ -698,14 +698,15 @@ test('Phase 4A: Multi-Agent streaming chat tags events with agentId and saves tu
   assert.equal(db.messages[1].role, 'assistant');
   assert.equal(db.messages[2].role, 'assistant');
   const agentIds = [db.messages[1].agent_id, db.messages[2].agent_id].sort();
-  assert.deepEqual(agentIds, ['dua-agent', 'personal-agent']);
+  assert.deepEqual(agentIds, ['code-helper', 'dua-work']);
 });
 
 test('Phase 4A: group chat without a mention dispatches every assigned agent', async () => {
   const db = database();
-  const conv = db.addConversation({ id: C1, agent_id: 'personal-agent' });
-  db.addConversationAgent(conv.id, 'personal-agent');
-  db.addConversationAgent(conv.id, 'dua-agent');
+  const conv = db.addConversation({ id: C1, agent_id: 'dua-work' });
+  db.customAgents.push({ id: 'code-helper', owner_id: UID, name: 'Code Helper', mode: 'auto', system_prompt: '' });
+  db.addConversationAgent(conv.id, 'dua-work');
+  db.addConversationAgent(conv.id, 'code-helper');
 
   let callCount = 0;
   const geminiRoutes = [
@@ -729,9 +730,9 @@ test('Phase 4A: group chat without a mention dispatches every assigned agent', a
   assert.equal(response.status, 200);
   const data = await response.json();
   assert.equal(data.replies.length, 2);
-  assert.deepEqual(data.replies.map(reply => reply.agentId), ['personal-agent', 'dua-agent']);
+  assert.deepEqual(data.replies.map(reply => reply.agentId), ['dua-work', 'code-helper']);
   assert.equal(db.messages.length, 3);
-  assert.deepEqual([db.messages[1].agent_id, db.messages[2].agent_id], ['personal-agent', 'dua-agent']);
+  assert.deepEqual([db.messages[1].agent_id, db.messages[2].agent_id], ['dua-work', 'code-helper']);
 
   const membershipRead = fetcher.calls.find(call => call.method === 'GET' && call.url.includes('/rest/v1/dua_conversation_agents'));
   assert.ok(membershipRead, 'group chat must read dua_conversation_agents');
@@ -747,9 +748,10 @@ test('Phase 4A: group chat without a mention dispatches every assigned agent', a
 
 test('Phase 4A: Multi-Agent non-streaming chat returns replies and saves turns', async () => {
   const db = database();
-  const conv = db.addConversation({ id: C2, title: 'Group Chat', agent_id: 'personal-agent' });
-  db.addConversationAgent(conv.id, 'personal-agent');
-  db.addConversationAgent(conv.id, 'dua-agent');
+  const conv = db.addConversation({ id: C2, title: 'Group Chat', agent_id: 'dua-work' });
+  db.customAgents.push({ id: 'code-helper', owner_id: UID, name: 'Code Helper', mode: 'auto', system_prompt: '' });
+  db.addConversationAgent(conv.id, 'dua-work');
+  db.addConversationAgent(conv.id, 'code-helper');
 
   let callCount = 0;
   const geminiRoutes = [
@@ -765,7 +767,7 @@ test('Phase 4A: Multi-Agent non-streaming chat returns replies and saves turns',
 
   const reqBody = {
     model: 'Dua',
-    messages: [{ role: 'user', text: '@PersonalAgent and @DuaAgent answer together' }],
+    messages: [{ role: 'user', text: '@DuaWork and @CodeHelper answer together' }],
     conversation_id: conv.id,
     stream: false,
   };
@@ -775,15 +777,15 @@ test('Phase 4A: Multi-Agent non-streaming chat returns replies and saves turns',
   const data = await response.json();
   assert.ok(Array.isArray(data.replies));
   assert.equal(data.replies.length, 2);
-  assert.equal(data.replies[0].agentId, 'personal-agent');
-  assert.equal(data.replies[1].agentId, 'dua-agent');
+  assert.equal(data.replies[0].agentId, 'dua-work');
+  assert.equal(data.replies[1].agentId, 'code-helper');
 
   // Verify that dua_messages saved both assistant turns
   assert.equal(db.messages.length, 3);
   assert.equal(db.messages[0].role, 'user');
   assert.equal(db.messages[1].role, 'assistant');
   assert.equal(db.messages[2].role, 'assistant');
-  assert.deepEqual([db.messages[1].agent_id, db.messages[2].agent_id].sort(), ['dua-agent', 'personal-agent']);
+  assert.deepEqual([db.messages[1].agent_id, db.messages[2].agent_id].sort(), ['code-helper', 'dua-work']);
   assert.equal(db.messages[1].model, env.GEMINI_MODEL);
   assert.equal(data.notice, undefined);
 });
@@ -827,9 +829,24 @@ test('PR D: unknown agent_id is refused with 400; official and owner agents are 
   assert.equal(custom.status, 200);
   assert.equal(db.messages.at(-1).agent_id, 'code-helper');
 
-  const official = await handleService(call('POST', '/api/chat', { ...body, agent_id: 'personal-agent' }), { env, fetcher });
+  const official = await handleService(call('POST', '/api/chat', { ...body, agent_id: 'dua-work' }), { env, fetcher });
   assert.equal(official.status, 200);
-  assert.equal(db.messages.at(-1).agent_id, 'personal-agent');
+  assert.equal(db.messages.at(-1).agent_id, 'dua-work');
+
+  const legacy = await handleService(call('POST', '/api/chat', { ...body, agent_id: 'dua-agent' }), { env, fetcher });
+  assert.equal(legacy.status, 200);
+  assert.equal(db.messages.at(-1).agent_id, 'dua-agent');
+
+  const fresh = db.addConversation({ id: C2, agent_id: 'dua-work' });
+  const retiredOnNew = await handleService(call('POST', '/api/chat', {
+    model: 'Dua',
+    messages: [{ role: 'user', text: 'Hello' }],
+    conversation_id: fresh.id,
+    agent_id: 'dua-agent',
+  }), { env, fetcher });
+  assert.equal(retiredOnNew.status, 400);
+  assert.equal((await retiredOnNew.json()).error, 'Unknown agent_id.');
+  assert.equal(db.messages.some(message => message.conversation_id === fresh.id), false);
 });
 
 test('PR D: a custom agent_id is not called unknown while dua_agents is unreadable (503, nothing written)', async () => {
@@ -876,8 +893,8 @@ test('PR D: a JSON reply whose save fails returns 200 with the text and a notice
 test('PR D: multi-agent JSON keeps every reply when the first agent save fails', async () => {
   const db = database();
   const conv = db.addConversation({ id: C2 });
-  db.addConversationAgent(conv.id, 'personal-agent');
-  db.addConversationAgent(conv.id, 'dua-agent');
+  db.addConversationAgent(conv.id, 'dua-work');
+  db.addConversationAgent(conv.id, 'code-helper');
   let n = 0;
   const gemini = [url => url.includes(':generateContent'), () => Response.json({ candidates: [{ content: { parts: [{ text: `Reply ${++n}` }] }, finishReason: 'STOP' }] })];
   const fetcher = router([failAssistantSaves, ...db.routes, gemini]);

@@ -46,11 +46,11 @@ list.
 **4.5 Preserve public APIs and naming.** `/api/orhan/*` and `dua_orhan_tasks` are kept for Android, so
 renaming them is breaking. `Dua Gen AI` is the platform, `Dua` chat and control plane, `Dua Work`
 execution and coding. `Orhan` is legacy internal only, never user facing.
-**4.6 One official pinned agent: `Dua Work`.** `personal-agent` is removed: never re-add, re-seed or
-call it official, and never add a second pinned agent without an owner decision in
-`docs/MASTER_PLAN.md`. `FACT:` the code lags. `apps/api/src/core/agents-skills.mjs` `OFFICIAL_AGENTS`
-still lists `personal-agent` first and `apps/api/src/core/conversations.mjs` `loadAvailableAgents`
-hardcodes both. Work to do, not truth to copy.
+**4.6 One official pinned agent: `Dua Work`.** `OFFICIAL_AGENTS` in
+`apps/api/src/core/agents-skills.mjs` and `loadAvailableAgents` in
+`apps/api/src/core/conversations.mjs` list only `dua-work`. Never add a second pinned agent without
+an owner decision in `docs/MASTER_PLAN.md`. `FACT:` a conversation row may still store `agent_id`
+`dua-agent`. `prepareConversationChat` accepts that stored id so older chats do not return 400.
 **4.7 No starter skill catalogue.** No fixed set of 5 skills as a product rule; the owner enables
 skills per agent, with no fixed catalogue size. `FACT:` the code lags.
 `apps/ai-engine/dua_engine/agent/dua_agent_prompts.json` still ships `frontend-developer`,
@@ -131,6 +131,6 @@ check you could not run.
 
 ## 7. Open items
 
-Two official agents and a 5 skill starter set are still in the code against 4.6 and 4.7. `google-adk`
+A 5 skill starter set is still in the code against 4.7. `google-adk`
 drift unresolved. No migration has a rollback. `apps/android/` and `archive/` are referenced but absent.
 No linter, formatter or type checker exists.

@@ -40,11 +40,9 @@ Errors are JSON `{ "error": "..." }` with `Cache-Control: no-store`, unless a ro
 
 ## Pinned agents
 
-Two roles are pinned and cannot be deleted (`personal-agent` and `dua-agent`). Custom agents and skills can be created, updated, and deleted via `/api/agents` and `/api/skills`.
+One official role is pinned and cannot be deleted (`dua-work`, Dua Work). Custom agents and skills can be created, updated, and deleted via `/api/agents` and `/api/skills`. A conversation row may still store `agent_id` `dua-agent`. Chat accepts that stored id, including when the request repeats it, so older chats do not return `400`.
 
-**Personal Agent.** Fast everyday chat, thinking, and quick tasks (`mode: "auto"`). The engine system prompt is `You are Dua AI, a helpful, smart, and polite personal AI assistant.` The client may add `personality` (max 1000 characters), `systemInstruction` (max 20000 characters), and `memory`. Those are appended under the server prompt and cannot replace it.
-
-**Dua Agent.** Specialized skills and multi-step tasks (`mode: "agent"`). The client sends skill ids in `skills`. The server appends the Super Agent prompt and active skill bodies. 5 starter skills are built-in from `dua_agent_prompts.json`:
+**Dua Work.** Fast everyday chat, tools, skills, and multi-step execution (`mode: "agent"`). Everyday chat through the configured provider uses the engine system prompt `You are Dua AI, a helpful, smart, and polite personal AI assistant.` The client may add `personality` (max 1000 characters), `systemInstruction` (max 20000 characters), and `memory`. Those are appended under the server prompt and cannot replace it. The client sends skill ids in `skills`. The server appends the Super Agent prompt and active skill bodies. 5 starter skills are built-in from `dua_agent_prompts.json`:
 
 | Id | Title |
 |---|---|
@@ -114,7 +112,7 @@ Cloud snapshot JSON is `format: "dua-cloud-snapshot"`, `version: 1`, plus `chats
 
 ### Chat, search, GitHub read
 
-`POST /api/chat` is Personal Agent and Build chat through the configured provider. It does not accept `skills` or `mode: "agent"`. Use the engine for Dua Agent.
+`POST /api/chat` is everyday chat and Build chat through the configured provider. It does not accept `skills` or `mode: "agent"`. Use the engine for Dua Work when the client sends skill ids.
 
 Request keys: `model`, `messages`, `attachments`, `memory`, `web`, `stream`, `mode`, `context`, `xSearch`, `code`, `repository`, `projectId`, `persistence`, `personality`, `conversation_id` (or `conversationId`), `agent_id` (or `agentId`).
 
@@ -163,7 +161,7 @@ Owner-only relational chat history (`dua_conversations`, `dua_messages`). The AP
 | Method and path | Request | Response |
 |---|---|---|
 | `GET /api/conversations?q=&limit=50&offset=0` | none. `q` matches titles literally (max 100 characters), `limit` 1–100, `offset` 0–10000 | `{ "conversations": [ conversation ], "limit": 50, "offset": 0, "hasMore": false }`, pinned first, then most recent |
-| `POST /api/conversations` | `{ "id"?: "uuid", "title"?: "", "agentId"?: "dua-agent" }` title 1–200 characters | `201` `{ "conversation": conversation }`. Repeating a client `id` returns the saved row; an id owned elsewhere is `409` |
+| `POST /api/conversations` | `{ "id"?: "uuid", "title"?: "", "agentId"?: "dua-work" }` title 1–200 characters | `201` `{ "conversation": conversation }`. Repeating a client `id` returns the saved row; an id owned elsewhere is `409`. Omitting `agentId` stores the column default `dua-agent` |
 | `GET /api/conversations/:id/messages?limit=200&before=ISO&beforeId=uuid` | none. `limit` 1–500, `before` an ISO-8601 timestamp, optional `beforeId` a message UUID (only with `before`: otherwise `400` `beforeId needs before.`; not a UUID is `400` `Invalid beforeId.`) | `{ "messages": [ message ], "hasMore": false }`, oldest first; `404` when the conversation is not the owner's |
 | `PUT /api/conversations/:id/pin` | `{ "pinned": true }` | `{ "conversation": conversation }`, `404` when not found |
 | `DELETE /api/conversations/:id` | none | `204`, `404` when not found. Its messages are deleted too |
@@ -181,13 +179,13 @@ Owner-only relational chat history (`dua_conversations`, `dua_messages`). The AP
 }
 ```
 
-For older messages, pass the first message's `createdAt` as `before` (the string exactly as returned, with its microseconds), and optionally its `id` as `beforeId` so messages that share the same `createdAt` are not skipped; `before` alone works as before. `lastMessagePreview` always shows the newest message (by `createdAt`): an older message saved later does not replace it. Message `id` and `createdAt` are always set by the database. `POST /api/chat` accepts an optional `conversation_id`: it saves the user turn before generation starts, and saves the assistant turn with `agent_id`, `model` and usage on completion (PR D). The user turn is written only after every request check passes, so a refused request (`4xx`/`503`) leaves no message behind. An explicit `agent_id` must be an official agent (`personal-agent`, `dua-agent`) or one of the owner's agents, otherwise `400` `Unknown agent_id.`; without it the conversation's agent is used. `model` holds the provider model id that answered (for example `gemini-…`), not the picker label. If the reply was generated but saving it fails, the reply is still delivered: a stream sends a `notice` event and then `done`, and a JSON reply is `200` with its text plus `notice` (group replies also carry `notice` on the affected `replies[]` entry).
+For older messages, pass the first message's `createdAt` as `before` (the string exactly as returned, with its microseconds), and optionally its `id` as `beforeId` so messages that share the same `createdAt` are not skipped; `before` alone works as before. `lastMessagePreview` always shows the newest message (by `createdAt`): an older message saved later does not replace it. Message `id` and `createdAt` are always set by the database. `POST /api/chat` accepts an optional `conversation_id`: it saves the user turn before generation starts, and saves the assistant turn with `agent_id`, `model` and usage on completion (PR D). The user turn is written only after every request check passes, so a refused request (`4xx`/`503`) leaves no message behind. An explicit `agent_id` must be the official agent (`dua-work`) or one of the owner's agents, otherwise `400` `Unknown agent_id.`; without it the conversation's agent is used. Repeating `agent_id` `dua-agent` is accepted when that conversation row is already stored as `dua-agent`. `model` holds the provider model id that answered (for example `gemini-…`), not the picker label. If the reply was generated but saving it fails, the reply is still delivered: a stream sends a `notice` event and then `done`, and a JSON reply is `200` with its text plus `notice` (group replies also carry `notice` on the affected `replies[]` entry).
 
 **Multi-Agent Group Chat & @mention (Phase 4A):**
 - A conversation can have multiple participating agents via `dua_conversation_agents`.
 - When a user includes `@AgentName` or `@agent-id` in a turn, the backend parses the mentions and dispatches **only** those targeted agents in parallel.
 - If no `@mention` is present in a group thread, all assigned group agents (up to 3) are dispatched concurrently.
-- In SSE streaming mode (`"stream": true`), stream events include `agentId` and `agentName` (e.g. `{ "type": "text", "delta": "...", "agentId": "dua-agent", "agentName": "Dua Agent" }`). Each agent emits an `agent_done` event upon completing.
+- In SSE streaming mode (`"stream": true`), stream events include `agentId` and `agentName` (e.g. `{ "type": "text", "delta": "...", "agentId": "dua-work", "agentName": "Dua Work" }`). Each agent emits an `agent_done` event upon completing.
 - Each responding agent commits its own assistant message turn to `dua_messages` tagged with its `agent_id`.
 - `/api/cloud` is unchanged.
 
@@ -269,7 +267,7 @@ Owner-only custom agents and specialized skills (`dua_agents`, `dua_agent_skills
 | Method and path | Request | Response |
 |---|---|---|
 | `GET /api/agents` | none | `{ "agents": [ agent ] }`, pinned first, then most recently updated |
-| `POST /api/agents` | `{ "id"?: "slug", "name": "Name", "description"?: "", "mode"?: "auto"\|"agent"\|"reasoning"\|"build", "systemPrompt"?: "", "model"?: null, "pinned"?: false }` | `201` `{ "agent": agent }`. Official agent IDs (`personal-agent`, `dua-agent`) cannot be created via POST |
+| `POST /api/agents` | `{ "id"?: "slug", "name": "Name", "description"?: "", "mode"?: "auto"\|"agent"\|"reasoning"\|"build", "systemPrompt"?: "", "model"?: null, "pinned"?: false }` | `201` `{ "agent": agent }`. The official agent ID (`dua-work`) cannot be created via POST |
 | `GET /api/agents/:id` | none | `{ "agent": agent }`, `404` when not found |
 | `PUT /api/agents/:id` | `{ "name"?: "", "description"?: "", "mode"?: "", "systemPrompt"?: "", "model"?: null, "pinned"?: false }` | `{ "agent": agent }`. For official agents, custom overrides are persisted; mode and id are immutable |
 | `DELETE /api/agents/:id` | none | `204`, `404` when not found. Official agents cannot be deleted (`400`) |
@@ -337,7 +335,7 @@ Owner-only instructions for autonomous and proactive agent behavior (`dua_agent_
 {
   "instruction": {
     "id": "uuid",
-    "agentId": "personal-agent",
+    "agentId": "dua-work",
     "instruction": "Always respond in concise Kotlin",
     "isActive": true,
     "createdAt": "ISO-8601"
