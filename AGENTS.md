@@ -66,11 +66,12 @@ the code or report the failure. No deleted assertion, loosened matcher, skipped 
 to turn a number green. No linter exists here, so never write "lint passed".
 **4.11 Never edit an applied migration, and every schema change ships a rollback file.** Migrations in
 `supabase/migrations/` are immutable once merged: fix forward with a new numbered file, named rollback
-kept beside it. No rollback, not done. `FACT:` 29 migrations exist, four have a rollback file
+kept beside it. No rollback, not done. `FACT:` 30 migrations exist, five have a rollback file
 (`202611280001_dua_function_history.rollback.sql`,
 `202611280002_dua_quota_rpc_dispatch.rollback.sql`,
-`202611280003_dua_task_links_event_backfill.rollback.sql` and
-`202611280004_dua_task_lineage_event_backfill.rollback.sql`).
+`202611280003_dua_task_links_event_backfill.rollback.sql`,
+`202611280004_dua_task_lineage_event_backfill.rollback.sql` and
+`202611280005_dua_memories_scope_history.rollback.sql`).
 **4.12 Staging only for database work.** Never point a local run, test or script at production.
 **4.13 Never push to `main`.** Push a branch, open a PR, wait for `Project checks` green. Merge,
 `supabase db push` and Cloud Run deploy each need an explicit owner yes in the PR thread, every time.
