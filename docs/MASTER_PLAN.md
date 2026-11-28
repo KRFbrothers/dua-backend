@@ -10,18 +10,18 @@ shipped behaviour; this file describes the target and the order of work.
 - **Single user, owner lock.** Exactly one owner, set by `DUA_ALLOWED_EMAIL`. In production
   (`NODE_ENV=production`) `dua-api` refuses to start without one valid owner email, and the access
   policy fails closed (503) instead of allowing open access. Every other account gets 403.
-- **Two official pinned agents only:**
-  - `personal-agent`: "Personal Agent", mode `auto` (fast everyday chat).
-  - `dua-agent`: "Dua Agent", mode `agent` (tools, skills, multi-step work).
+- **One official pinned agent only:**
+  - `dua-work`: "Dua Work", mode `agent` (fast everyday chat, tools, skills, and multi-step execution).
 
-  Both are always pinned and protected from deletion. They can be configured, not removed.
+  Always pinned and protected from deletion. It can be configured, not removed. Existing
+  conversation rows may still store `agent_id` `dua-agent`; chat accepts that stored id.
 - **Skills are not agents.** The 5 reference skills (`frontend-developer`, `backend-architect`,
-  `api-tester`, `devops-automator`, `code-reviewer`) are skills that Dua Agent can use. They are not
+  `api-tester`, `devops-automator`, `code-reviewer`) are skills that Dua Work can use. They are not
   separate agents.
-- **Unlimited skills for Dua Agent.** There is no fixed catalogue size. The only limit is a guard
+- **Unlimited skills for Dua Work.** There is no fixed catalogue size. The only limit is a guard
   on the total composed prompt size.
-- **Unlimited custom agents.** The owner can create any number of custom agents alongside the two
-  official ones.
+- **Unlimited custom agents.** The owner can create any number of custom agents alongside the one
+  official agent.
 - **Relational chats.** Conversations and messages live in proper tables (`dua_conversations`,
   `dua_messages`) with search, pinning and recent ordering.
 - **Global memory with privacy boundaries.** Memory is shared across agents by default. Agents and
@@ -113,7 +113,7 @@ shipped behaviour; this file describes the target and the order of work.
 ### PR E: agents and skills (completed)
 
 - Tables `dua_agents` and `dua_agent_skills` with owner-only RLS and delete protection on official agents.
-- Agents CRUD: official `personal-agent` and `dua-agent` pinned and protected from deletion.
+- Agents CRUD: official `dua-work` pinned and protected from deletion. Existing conversation rows may still store `agent_id` `dua-agent`.
 - AI generators: `POST /api/agents/generate-prompt` and `POST /api/skills/generate` in Node using Gemini with quota guard.
 - Skills CRUD: starter skills loaded without DB seed, overrides persisted, custom skills created/deleted.
 - Unlimited skills: removed static skill cap in Python engine (`MAX_COMPOSED_PROMPT_CHARS = 120_000` guard) and Node web chat (`SKILL_ID` regex).

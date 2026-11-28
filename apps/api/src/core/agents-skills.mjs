@@ -8,7 +8,7 @@
 // They are not seeded into the database. dua_agent_skills stores user-created skills plus starter
 // overrides (e.g. enable/disable).
 //
-// Two official pinned agents ('personal-agent' and 'dua-agent') cannot be deleted.
+// One official pinned agent ('dua-work') cannot be deleted.
 import { readFileSync } from 'node:fs';
 import { readJsonLimited } from './limited-json.mjs';
 import { resolveOwner, StorageError } from './storage.mjs';
@@ -27,19 +27,9 @@ const MODES = new Set(['auto', 'agent', 'reasoning', 'build']);
 
 export const OFFICIAL_AGENTS = Object.freeze([
   {
-    id: 'personal-agent',
-    name: 'Personal Agent',
-    description: 'Fast everyday chat, thinking and quick tasks.',
-    mode: 'auto',
-    systemPrompt: '',
-    model: null,
-    pinned: true,
-    isOfficial: true,
-  },
-  {
-    id: 'dua-agent',
-    name: 'Dua Agent',
-    description: 'Specialized skills, tools, and multi-step tasks.',
+    id: 'dua-work',
+    name: 'Dua Work',
+    description: 'Fast everyday chat, tools, skills, and multi-step execution.',
     mode: 'agent',
     systemPrompt: '',
     model: null,
@@ -47,6 +37,9 @@ export const OFFICIAL_AGENTS = Object.freeze([
     isOfficial: true,
   },
 ]);
+
+/** Older dua_conversations rows, and the column default, still store this id. */
+export const LEGACY_CONVERSATION_AGENT_ID = 'dua-agent';
 
 let STARTER_SKILLS = null;
 export function getStarterSkills() {
