@@ -47,6 +47,7 @@ test('server entry point honors container binding and serves unauthenticated con
       assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
       assert.equal(response.headers.get('x-frame-options'), 'DENY');
       assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+      assert.equal(response.headers.get('strict-transport-security'), 'max-age=31536000; includeSubDomains');
       assert.match(response.headers.get('content-security-policy'), /default-src 'none'/);
       const data = await response.json();
       assert.ok(data && typeof data === 'object');
@@ -56,6 +57,7 @@ test('server entry point honors container binding and serves unauthenticated con
     assert.equal(missing.status, 404);
     assert.equal(missing.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(missing.headers.get('x-frame-options'), 'DENY');
+    assert.equal(missing.headers.get('strict-transport-security'), 'max-age=31536000; includeSubDomains');
   } finally {
     child.kill('SIGTERM');
     await exited;
