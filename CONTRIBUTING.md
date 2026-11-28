@@ -86,7 +86,8 @@ match, and it refuses to run when `DUA_ALLOWED_EMAIL` is set. It deletes its two
 ## 5. Database changes
 
 - Migrations are immutable. Never edit a file in `supabase/migrations/` that is already merged.
-- A change is a new numbered file, plus a rollback file.
+- A change is a new numbered file in `supabase/migrations/`, plus a rollback file in `supabase/rollbacks/`.
+  `supabase db push` applies every `.sql` file in `supabase/migrations/`, so a rollback must not sit there.
 - `supabase db push` needs an explicit owner yes, every time.
 - A new table needs `enable row level security`, an owner-scoped policy for each verb it allows, and
   a line in `SUPABASE.md`.

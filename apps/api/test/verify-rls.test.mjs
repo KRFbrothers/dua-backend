@@ -5,6 +5,14 @@ import { fileURLToPath } from 'node:url';
 import { verifyRls, main, DEFAULT_TABLES } from '../scripts/verify-rls.mjs';
 
 const MIGRATIONS = fileURLToPath(new URL('../../../supabase/migrations/', import.meta.url));
+const ROLLBACKS = fileURLToPath(new URL('../../../supabase/rollbacks/', import.meta.url));
+const ROLLBACK_FILES = [
+  '202611280001_dua_function_history.rollback.sql',
+  '202611280002_dua_quota_rpc_dispatch.rollback.sql',
+  '202611280003_dua_task_links_event_backfill.rollback.sql',
+  '202611280004_dua_task_lineage_event_backfill.rollback.sql',
+  '202611280005_dua_memories_scope_history.rollback.sql',
+];
 
 test('DEFAULT_TABLES matches every table created by the migrations', async () => {
   const files = (await readdir(MIGRATIONS)).filter(f => f.endsWith('.sql'));
@@ -17,6 +25,16 @@ test('DEFAULT_TABLES matches every table created by the migrations', async () =>
   }
   assert.deepEqual([...created].sort(), [...DEFAULT_TABLES].sort(),
     'DEFAULT_TABLES drifted from supabase/migrations \u2014 update scripts/verify-rls.mjs');
+});
+
+test('rollback scripts live in supabase/rollbacks and are not forward migrations', async () => {
+  const migrationFiles = await readdir(MIGRATIONS);
+  assert.deepEqual(migrationFiles.filter(name => name.endsWith('.rollback.sql')), []);
+  assert.deepEqual(migrationFiles.filter(name => !name.endsWith('.sql')), []);
+  const rollbackFiles = await readdir(ROLLBACKS);
+  for (const name of ROLLBACK_FILES) {
+    assert.ok(rollbackFiles.includes(name), `${name} missing from supabase/rollbacks`);
+  }
 });
 
 const env = { SUPABASE_URL: 'https://project.supabase.co', SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_mock_public_key' };

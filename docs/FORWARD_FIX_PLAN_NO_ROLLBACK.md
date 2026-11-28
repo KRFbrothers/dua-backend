@@ -1,6 +1,6 @@
 # Forward fix plan for the six migrations that cannot be rolled back
 
-`supabase/migrations/ROLLBACK_STATUS.md` records 30 migrations, 24 rollback-able and 6 not.
+`supabase/rollbacks/ROLLBACK_STATUS.md` records 30 migrations, 24 rollback-able and 6 not.
 This file is the plan for those 6. All six forward fixes have since shipped, so this file is now
 the record of what was done and why, not a to-do list. The six original files are still marked
 NO in `ROLLBACK_STATUS.md`, and that is correct: a forward fix does not make the original file
@@ -293,7 +293,7 @@ access it closed.
 
 **Forward fix.** Same mechanism as item 1, plus a generator. Once
 `public.dua_function_history` exists, a small script reads the history for a given migration's
-function list and writes the matching `.rollback.sql` beside it. That turns the AGENTS.md 4.11
+function list and writes the matching `.rollback.sql` into `supabase/rollbacks/`. That turns the AGENTS.md 4.11
 rule from a manual promise into a generated artifact.
 
 **Landed as.** `202611280001_dua_function_history.sql` (PR #58) plus the rollback generator (PR #59).
@@ -401,8 +401,11 @@ steps so a reviewer can check it:
    name as a dispatcher. A rollback is then a one line swap.
 5. **Never drop a table that holds data you cannot rebuild.** Write the values to an append-only
    history table first, then the table is a cache.
-6. **Ship the rollback file beside the migration.** `202612010001_x.sql` and
-   `202612010001_x.rollback.sql`, same directory, same PR. No rollback, not done.
+6. **Ship the rollback file in `supabase/rollbacks/`.** The forward file stays in
+   `supabase/migrations/202612010001_x.sql`. The rollback is
+   `supabase/rollbacks/202612010001_x.rollback.sql`, same PR. No rollback, not done.
+   `supabase db push` applies every `.sql` file under `supabase/migrations/`, so the rollback
+   must not share that directory.
 7. **Say which of the six patterns the file uses** in the PR body, so the reviewer does not have
    to read the SQL to know whether it is reversible.
 
