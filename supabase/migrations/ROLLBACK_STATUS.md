@@ -84,14 +84,29 @@ repo reads it yet, so adding one is a separate decision.
 
 ## The six that cannot be rolled back
 
-| File | Why not |
-| --- | --- |
-| `20261102183410_workflow_identity_recovery.sql` | Replaces two functions from an earlier file and holds encrypted refresh tokens |
-| `202611160001_owner_scoped_quota_rpcs.sql` | Drops the old function signatures on purpose, so a drop leaves no RPC |
-| `202611190003_dua_memories_scope.sql` | Column drop destroys scope and thread links that cannot be rebuilt |
-| `202611250001_dua_orhan_tasks_lifecycle.sql` | Column drop destroys why and when each task ended |
-| `202611260001_workflow_rpcs_authenticated.sql` | Rewrites ten functions across three earlier files |
-| `202611270001_dua_task_lifecycle_workers.sql` | Column drop destroys task lineage and the append-only audit trail |
+**Read this before the table.** NO means irreversible, not unfinished. These six files cannot be
+undone by a script because each one either adds columns with `alter table ... add column` or
+drops and replaces function bodies, and the old value is not recorded anywhere the file itself
+writes. That property does not change with time.
+
+All six now have a forward fix shipped, so the data they would lose is recorded somewhere else
+before it can be lost. The last column of the table below names the fix and its PR.
+
+A forward fix does not make the original file rollback-able. It makes the changes that come
+after it reversible, by capturing the value before it is overwritten or dropped. The original
+`add column` or `drop function` in these six files stays irreversible.
+
+For the full per item status, the approach each fix takes and what is still open, see the
+`Current status` section of `docs/FORWARD_FIX_PLAN_NO_ROLLBACK.md`.
+
+| File | Why not | Forward fix |
+| --- | --- | --- |
+| `20261102183410_workflow_identity_recovery.sql` | Replaces two functions from an earlier file and holds encrypted refresh tokens | `202611280001_dua_function_history.sql`, PR #58 |
+| `202611160001_owner_scoped_quota_rpcs.sql` | Drops the old function signatures on purpose, so a drop leaves no RPC | `202611280002_dua_quota_rpc_dispatch.sql`, PR #60 |
+| `202611190003_dua_memories_scope.sql` | Column drop destroys scope and thread links that cannot be rebuilt | `202611280005_dua_memories_scope_history.sql`, PR #64 |
+| `202611250001_dua_orhan_tasks_lifecycle.sql` | Column drop destroys why and when each task ended | `202611280003_dua_task_links_event_backfill.sql`, PR #61, API half PR #65 |
+| `202611260001_workflow_rpcs_authenticated.sql` | Rewrites ten functions across three earlier files | `202611280001_dua_function_history.sql` plus generator, PR #58 and #59 |
+| `202611270001_dua_task_lifecycle_workers.sql` | Column drop destroys task lineage and the append-only audit trail | `202611280004_dua_task_lineage_event_backfill.sql`, PR #62, API half PR #63 |
 
 ## Highest risk cases
 
