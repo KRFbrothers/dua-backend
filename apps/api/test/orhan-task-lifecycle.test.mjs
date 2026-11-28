@@ -89,6 +89,29 @@ test('a child task inherits the parent root and thread', async () => {
   assert.equal(task.continueThreadId, '99999999-8888-4777-8666-555555555555');
 });
 
+test('the created event carries the four lineage keys, so the trail alone shows the chain', async () => {
+  const { rows, events, fetcher } = store();
+  const first = await (await handleService(call('POST', '/api/orhan/tasks', { prompt: 'One' }), { env, fetcher })).json();
+  const parentId = first.task.id;
+  rows[0].continue_thread_id = '99999999-8888-4777-8666-555555555555';
+  const second = await (await handleService(call('POST', '/api/orhan/tasks', {
+    prompt: 'Two', parentTaskId: parentId, idempotencyKey: 'client-key-2',
+  }), { env, fetcher })).json();
+  const created = events.filter(e => e.event === 'created');
+  assert.equal(created.length, 2);
+  // A first task is its own root and has no parent, so only root_task_id is present.
+  assert.equal(created[0].detail.root_task_id, parentId);
+  assert.equal(created[0].detail.parent_task_id, undefined);
+  assert.equal(created[0].detail.continue_thread_id, undefined);
+  assert.equal(created[0].detail.idempotency_key, undefined);
+  // The child carries all four, spelled as the 202611280004 backfill spells them.
+  assert.equal(created[1].detail.parent_task_id, parentId);
+  assert.equal(created[1].detail.root_task_id, parentId);
+  assert.equal(created[1].detail.continue_thread_id, '99999999-8888-4777-8666-555555555555');
+  assert.equal(created[1].detail.idempotency_key, 'client-key-2');
+  assert.equal(created[1].task_id, second.task.id);
+});
+
 test('an unknown parent is refused with 404, not silently ignored', async () => {
   const { fetcher } = store();
   const response = await handleService(call('POST', '/api/orhan/tasks', {

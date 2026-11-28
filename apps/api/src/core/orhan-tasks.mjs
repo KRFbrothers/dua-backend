@@ -182,7 +182,17 @@ async function createTask(request, db, owner, env, fetcher, log) {
   const saved = await write(db, '', 'POST', row, { duplicate: Boolean(requestId) });
   if (saved === DUPLICATE) return replay(await load(db, requestId), prompt);
   if (saved instanceof Response) return saved;
-  await log(taskId, 'created', { parentTaskId: parent ? parent.task_id : undefined, status: 'waiting' });
+  // The four lineage values go into the event detail as well as the task row, so the
+  // append-only trail alone can answer "where did this task come from". The names match
+  // 202611280004_dua_task_lineage_event_backfill.sql, which backfilled the same keys.
+  await log(taskId, 'created', {
+    parentTaskId: parent ? parent.task_id : undefined,
+    parent_task_id: row.parent_task_id || undefined,
+    root_task_id: row.root_task_id || undefined,
+    continue_thread_id: row.continue_thread_id || undefined,
+    idempotency_key: row.idempotency_key || undefined,
+    status: 'waiting',
+  });
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
