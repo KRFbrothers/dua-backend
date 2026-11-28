@@ -10,9 +10,12 @@
 -- increments `attempt` on retry, and lines 482 to 486 read them back. That is
 -- why the file is marked NO in `ROLLBACK_STATUS.md`.
 --
--- This file is forward fix item 4 from `docs/FORWARD_FIX_PLAN_NO_ROLLBACK.md`
--- (the plan numbers it item 6; the three lifecycle values were the earlier
--- backfill in `202611280003_dua_task_links_event_backfill.sql`).
+-- This file is forward fix item 6 from `docs/FORWARD_FIX_PLAN_NO_ROLLBACK.md`
+-- (the plan numbers the five lineage values item 6; the three lifecycle
+-- values were the earlier backfill in
+-- `202611280003_dua_task_links_event_backfill.sql`, which is item 4).
+-- Comment only correction: this file is already applied, so nothing below
+-- this header changes. No schema change.
 -- It copies the five values into `dua_task_events.detail` for every task that
 -- already carries at least one of them, so the columns become a cache and a
 -- later drop is recoverable from the event stream.
