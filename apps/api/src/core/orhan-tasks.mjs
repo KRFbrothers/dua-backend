@@ -316,8 +316,12 @@ async function continueTask(db, taskId, env, fetcher, token, log) {
   });
   if (saved instanceof Response) return saved;
   if (!saved) return loadResponse(db, taskId);
-  if (status === 'completed') await log(taskId, 'completed', { runCount: Number(fresh.run_count) + 1, toStatus: 'completed' });
-  else if (status === 'failed') await log(taskId, 'failed', { runCount: Number(fresh.run_count) + 1, toStatus: 'failed', endReason: 'error' });
+  // The three lifecycle values go into the event detail as well as the task row, so the
+  // append-only trail alone can answer why a task ended and when. The names match
+  // 202611280003_dua_task_links_event_backfill.sql, which backfilled the same keys.
+  const lifecycle = terminalDetail(saved);
+  if (status === 'completed') await log(taskId, 'completed', { runCount: Number(fresh.run_count) + 1, toStatus: 'completed', ...lifecycle });
+  else if (status === 'failed') await log(taskId, 'failed', { runCount: Number(fresh.run_count) + 1, toStatus: 'failed', endReason: 'error', ...lifecycle });
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -331,7 +335,7 @@ async function cancelTask(db, taskId, log) {
     if (current.status === 'cancelled') return Response.json({ task: present(current) }, { headers: { 'Cache-Control': 'no-store' } });
     return noStore('This task can no longer be cancelled.', 409);
   }
-  await log(taskId, 'cancelled', { toStatus: 'cancelled', endReason: 'user_stop' });
+  await log(taskId, 'cancelled', { toStatus: 'cancelled', endReason: 'user_stop', ...terminalDetail(saved) });
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 
@@ -384,6 +388,18 @@ function outcome(steps) {
   return 'failed';
 }
 
+// The three lifecycle columns as event detail, spelled as 202611280003 backfilled them.
+// A null column becomes undefined, which safeDetail skips, so an event that carries no
+// terminal value keeps exactly the detail it had before.
+function terminalDetail(row) {
+  if (!row) return {};
+  return {
+    end_reason: row.end_reason || undefined,
+    finished_at_ms: Number(row.finished_at_ms) || undefined,
+    stopped_at_ms: Number(row.stopped_at_ms) || undefined,
+  };
+}
+
 // Terminal fields: finished_at_ms on completed/failed; end_reason on failure (default error).
 function ending(status, now, reason = 'error') {
   if (status === 'completed') return { finished_at_ms: now, end_reason: null };
@@ -400,7 +416,7 @@ async function finish(db, taskId, current, status, error, reason = 'error', log)
   if (!saved) return loadResponse(db, taskId);
   // reason === 'timeout' is the one terminal failure that has its own event name.
   const event = status === 'completed' ? 'completed' : reason === 'timeout' ? 'timed_out' : 'failed';
-  await log(taskId, event, { fromStatus: 'running', toStatus: status, endReason: reason });
+  await log(taskId, event, { fromStatus: 'running', toStatus: status, endReason: reason, ...terminalDetail(saved) });
   return Response.json({ task: present(saved) }, { headers: { 'Cache-Control': 'no-store' } });
 }
 

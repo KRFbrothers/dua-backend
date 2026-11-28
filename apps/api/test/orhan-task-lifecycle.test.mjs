@@ -183,3 +183,28 @@ test('a client-supplied X-Request-Id is not adopted', async () => {
   const response = await handleService(request, { env, fetcher });
   assert.notEqual(response.headers.get('x-request-id'), 'forged-id-123456');
 });
+
+test('the cancelled event carries end_reason and stopped_at_ms, so the trail alone shows why it stopped', async () => {
+  const { events, fetcher } = store();
+  const { task } = await (await handleService(call('POST', '/api/orhan/tasks', { prompt: 'x' }), { env, fetcher })).json();
+  await handleService(call('POST', `/api/orhan/tasks/${task.id}/start`), { env, fetcher });
+  const response = await handleService(call('POST', `/api/orhan/tasks/${task.id}/cancel`), { env, fetcher });
+  assert.equal(response.status, 200);
+  const cancelled = events.find(e => e.event === 'cancelled');
+  assert.equal(cancelled.detail.end_reason, 'user_stop');
+  assert.equal(typeof cancelled.detail.stopped_at_ms, 'number');
+  assert.ok(cancelled.detail.stopped_at_ms > 0);
+  // The camelCase name the API already used is still there, so nothing that read it breaks.
+  assert.equal(cancelled.detail.endReason, 'user_stop');
+  // A cancelled task never finished, so the finished timestamp is absent, not null.
+  assert.equal(cancelled.detail.finished_at_ms, undefined);
+});
+
+test('the created event carries no lifecycle keys, so a fresh task detail is unchanged', async () => {
+  const { events, fetcher } = store();
+  await handleService(call('POST', '/api/orhan/tasks', { prompt: 'x' }), { env, fetcher });
+  const created = events.find(e => e.event === 'created');
+  assert.equal(created.detail.end_reason, undefined);
+  assert.equal(created.detail.finished_at_ms, undefined);
+  assert.equal(created.detail.stopped_at_ms, undefined);
+});
