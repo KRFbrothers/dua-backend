@@ -23,8 +23,8 @@ In `apps/api`: `npm ci --ignore-scripts --no-audit --no-fund`, `npm test`, `npm 
 `npm start`. From the root: `python -m pytest -q apps/ai-engine/tests`. `npm run verify:rls` needs live
 Supabase and never runs in CI. Node floor `24` (`.nvmrc`, `engines` in `apps/api/package.json`); deps
 are `unpdf` and `cfb` only. CI is `.github/workflows/checks.yml`, workflow `Project checks`, two jobs,
-no secret scan, no audit, no lint. `FACT:` `google-adk` is `2.12.0` in `requirements.txt` but `2.14.1`
-in `requirements-lock.txt`, and CI installs the lock.
+no secret scan, no audit, no lint. `FACT:` `google-adk` is `2.14.1` in `requirements.txt` and
+`requirements-lock.txt`, and CI installs the lock.
 
 ## 3. Secrets
 
@@ -132,6 +132,7 @@ check you could not run.
 
 ## 7. Open items
 
-A 5 skill starter set is still in the code against 4.7. `google-adk`
-drift unresolved. No migration has a rollback. `apps/android/` and `archive/` are referenced but absent.
+A 5 skill starter set is still in the code against 4.7. Rollback scripts live in
+`supabase/rollbacks/` and are tracked by `supabase/rollbacks/ROLLBACK_STATUS.md`.
+`apps/android/` and `archive/` are referenced but absent.
 No linter, formatter or type checker exists.

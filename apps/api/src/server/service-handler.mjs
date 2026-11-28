@@ -33,6 +33,7 @@ export const SECURITY_HEADERS = {
   'X-Frame-Options': 'DENY',
   'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
 };
 
 export function applySecurityHeaders(response) {
