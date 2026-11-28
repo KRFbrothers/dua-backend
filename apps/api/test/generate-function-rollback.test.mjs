@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   normalizeType,
@@ -9,9 +10,20 @@ import {
   parseMigrationFunctions,
   planRollback,
   buildRollbackSql,
+  defaultRollbackPath,
 } from '../scripts/generate-function-rollback.mjs';
 
 const MIGRATIONS = fileURLToPath(new URL('../../../supabase/migrations/', import.meta.url));
+
+test('defaultRollbackPath writes under supabase/rollbacks', () => {
+  const migration = join(MIGRATIONS, '202611260001_workflow_rpcs_authenticated.sql');
+  const out = defaultRollbackPath(migration);
+  assert.equal(
+    out,
+    join(dirname(migration), '..', 'rollbacks', '202611260001_workflow_rpcs_authenticated.rollback.sql'),
+  );
+  assert.equal(basename(dirname(out)), 'rollbacks');
+});
 
 test('normalizeType maps aliases to the names oidvectortypes prints', () => {
   assert.equal(normalizeType('INT'), 'integer');

@@ -169,7 +169,7 @@ Apply `supabase/migrations/202611280001_dua_function_history.sql` after `2026112
 
 `p_args` is the type list only, for example `uuid, uuid`, because the helper matches on `oidvectortypes(proargtypes)`. A rollback re-applies the newest captured `definition` for that function. The table is inert until a migration calls the helper, so it cannot affect a running workflow.
 
-Rollback: `202611280001_dua_function_history.rollback.sql` beside it drops the helper, the indexes and the table. It deletes every captured definition, so export the table first if a body is still needed.
+Rollback: `supabase/rollbacks/202611280001_dua_function_history.rollback.sql` drops the helper, the indexes and the table. It deletes every captured definition, so export the table first if a body is still needed.
 
 
 ## 2. Configure the shared backend

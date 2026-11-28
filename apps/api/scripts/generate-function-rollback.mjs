@@ -7,13 +7,14 @@
 // `202611280001_dua_function_history.sql` fixed the recording half. This script is
 // the reading half: it takes a migration file, works out which functions that file
 // replaced or dropped, pulls the body each one had before, and writes the matching
-// rollback beside it.
+// rollback into supabase/rollbacks/. `supabase db push` applies every .sql file in
+// supabase/migrations/, so a rollback must not sit beside its forward twin.
 //
 // Usage
 //   node scripts/generate-function-rollback.mjs <migration.sql> [options]
 //
 //   --database-url <url>   Postgres connection string. Defaults to $DATABASE_URL.
-//   --out <path>           Where to write. Defaults to <migration>.rollback.sql.
+//   --out <path>           Where to write. Defaults to supabase/rollbacks/<migration>.rollback.sql.
 //   --before <timestamp>   Only use history captured before this instant. Optional;
 //                          without it the newest body that differs from the live one
 //                          is used, which is the body the migration replaced.
@@ -39,7 +40,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { access, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,16 @@ const TYPE_ALIASES = new Map([
   ['timestamp', 'timestamp without time zone'], ['serial', 'integer'],
   ['bigserial', 'bigint'], ['smallserial', 'smallint'],
 ]);
+
+/**
+ * Default write location for a generated rollback.
+ * A file in `supabase/migrations/` is written to the sibling `supabase/rollbacks/`
+ * directory, so `supabase db push` never applies the rollback as a forward migration.
+ */
+export function defaultRollbackPath(migrationPath) {
+  const rollbackName = basename(migrationPath).replace(/\.sql$/, '.rollback.sql');
+  return join(dirname(migrationPath), '..', 'rollbacks', rollbackName);
+}
 
 /** Collapse whitespace and map an alias to the name `oidvectortypes()` prints. */
 export function normalizeType(raw) {
@@ -290,7 +301,7 @@ function header({ migrationName, generatedAt, restores, missing, dropped, create
     '-- `create or replace` keeps the existing grants on each function.',
     '--',
     '-- Apply with:',
-    `--   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f ${migrationName.replace(/\.sql$/, '.rollback.sql')}`,
+    `--   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/rollbacks/${migrationName.replace(/\.sql$/, '.rollback.sql')}`,
     '--',
     '-- Safe to run again: every statement is `create or replace` or `drop if exists`.',
   ];
@@ -440,7 +451,7 @@ function isLocalHost(databaseUrl) {
 const USAGE = `Usage: node scripts/generate-function-rollback.mjs <migration.sql> [options]
 
   --database-url <url>   Postgres connection string (default: $DATABASE_URL)
-  --out <path>           Output path (default: <migration>.rollback.sql)
+  --out <path>           Output path (default: supabase/rollbacks/<migration>.rollback.sql)
   --before <timestamp>   Only use history captured before this instant
   --dry-run              Print the SQL instead of writing a file
   --force                Overwrite an existing rollback file
@@ -489,7 +500,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   const plan = planRollback({ functions, history, live, before: options.before });
-  const migrationName = migrationPath.split('/').pop();
+  const migrationName = basename(migrationPath);
   const output = buildRollbackSql({ migrationName, ...plan });
 
   if (plan.missing.length || plan.dropped.length) {
@@ -509,7 +520,7 @@ export async function main(argv = process.argv.slice(2)) {
     return 0;
   }
 
-  const outPath = options.out ? resolve(options.out) : join(dirname(migrationPath), migrationName.replace(/\.sql$/, '.rollback.sql'));
+  const outPath = options.out ? resolve(options.out) : defaultRollbackPath(migrationPath);
   if (!options.force) {
     try {
       await access(outPath);

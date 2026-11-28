@@ -1,10 +1,13 @@
 # Migration rollback status
 
-Inventory of every file in `supabase/migrations/` and whether it can be rolled back.
+Inventory of every forward file in `supabase/migrations/` and whether it can be rolled back.
+The rollback scripts themselves live in `supabase/rollbacks/`, not beside the forward files.
+`supabase db push` applies every `.sql` file in `supabase/migrations/`, so a rollback in that
+directory would run as a forward migration or collide on the shared timestamp.
 
-`AGENTS.md` 4.11 and `CONTRIBUTING.md` section 5 both require a rollback file beside every
-migration. `AGENTS.md` 4.11 also records the current fact: 30 migrations exist, five have a
-rollback file (`202611280001_dua_function_history.rollback.sql`,
+`AGENTS.md` 4.11 and `CONTRIBUTING.md` section 5 both require a rollback file in
+`supabase/rollbacks/` for every migration. `AGENTS.md` 4.11 also records the current fact:
+30 migrations exist, five have a rollback file (`202611280001_dua_function_history.rollback.sql`,
 `202611280002_dua_quota_rpc_dispatch.rollback.sql`,
 `202611280003_dua_task_links_event_backfill.rollback.sql`,
 `202611280004_dua_task_lineage_event_backfill.rollback.sql` and
@@ -34,18 +37,20 @@ No migration file was edited, renamed or deleted to produce this document.
 
 ## Naming convention
 
-No rollback file and no down migration pattern exists in this repository today. There is no
-`*.rollback.sql`, no `down/` directory and no `supabase migration` down step in any workflow.
-So this document does not invent a new mechanism. It records the convention that `AGENTS.md`
-4.11 already states, which is a rollback file kept beside the migration:
+Forward migrations stay in `supabase/migrations/` and are the only `.sql` files there.
+Rollback scripts live in `supabase/rollbacks/` with the same timestamp and a `.rollback.sql`
+suffix. The five files that exist today are listed above. There is no `down/` directory and
+no `supabase migration` down step in any workflow. Apply a rollback by hand against staging.
+Do not use `supabase db push` to run one.
 
 ```
 supabase/migrations/202611270001_dua_task_lifecycle_workers.sql
-supabase/migrations/202611270001_dua_task_lifecycle_workers.rollback.sql
+supabase/rollbacks/202611270001_dua_task_lifecycle_workers.rollback.sql
 ```
 
-That name is a proposal for the next migration, not something this PR adds. Nothing in the
-repo reads it yet, so adding one is a separate decision.
+The `202611270001` pair is the naming example. That rollback file is not in the repo. The
+generator `apps/api/scripts/generate-function-rollback.mjs` writes new function rollbacks
+into `supabase/rollbacks/`.
 
 ## Inventory
 
@@ -76,11 +81,11 @@ repo reads it yet, so adding one is a separate decision.
 | 23 | `202611260001_workflow_rpcs_authenticated.sql` | Replaces ten workflow RPCs with `security definer` versions that require `auth.uid() = p_owner`, and moves execute grants to `authenticated` | NO | Would need the previous bodies re-applied from files 9, 10 and 11, plus the old grants | The file rewrites ten functions across three earlier migrations. A drop leaves the workflow with no RPCs, and the API already calls the owner-scoped shape. Reverting also reopens the service-role-only access the file closed. |
 | 24 | `202611260002_dua_messages_preview_guard.sql` | Replaces the preview trigger function and narrows the `dua_messages` insert grant to named columns | YES | Re-apply the trigger function body from file 16, then `revoke insert` and `grant insert on public.dua_messages to authenticated` | No data loss. Reverting lets a client set `created_at` and `id` again, which is the bug the file fixes, so only revert with the matching code. |
 | 25 | `202611270001_dua_task_lifecycle_workers.sql` | Adds five columns and four constraints to `dua_orhan_tasks`, creates `dua_task_events` and `dua_workers`, adds six functions and an append-only trigger | NO | Would need `drop column` on five columns plus dropping two tables and six functions | Dropping the columns destroys parent and root task links, the attempt counter and the idempotency key, so retry and continue history is lost. `dua_task_events` is the audit trail and cannot be rebuilt. |
-| 26 | `202611280001_dua_function_history.sql` | Creates `dua_function_history`, the `dua_capture_function` helper and two indexes, and captures the current body of eleven workflow functions | YES | `202611280001_dua_function_history.rollback.sql` beside it: drop the helper, the two indexes, then the table | Data loss: every captured function definition is deleted, so a function replaced after this migration loses its restore point. Export the table first if a body is still needed. The table is inert until a migration calls the helper, so the rollback cannot break a running workflow. |
-| 27 | `202611280002_dua_quota_rpc_dispatch.sql` | Moves the `dua_consume_imagine` and `dua_start_voice_session` bodies to `_v2` names and leaves the public names as thin dispatchers, so a future signature change is a swap instead of a `drop function` | YES | `202611280002_dua_quota_rpc_dispatch.rollback.sql` beside it, generated from `dua_function_history`: restore both public bodies, then `drop function` the two `_v2` names | Data loss: none. Quota counters and voice sessions are untouched, and the dispatcher passes every argument through unchanged. The rollback drops the `_v2` functions, so a caller that started using `_v2` directly would break; the API calls the public names only. |
-| 28 | `202611280003_dua_task_links_event_backfill.sql` | Copies `end_reason`, `finished_at_ms` and `stopped_at_ms` from `dua_orhan_tasks` into one `dua_task_events` row per finished task, so the three columns from file 24 become a cache instead of the only copy | YES | `202611280003_dua_task_links_event_backfill.rollback.sql` beside it, hand written because no function body changes: drop the append-only trigger, delete the rows marked `backfill_migration = 202611280003`, recreate the trigger | Data loss: none. The three values stay in `dua_orhan_tasks`, which this file only reads. The rollback has to drop the append-only trigger for the length of one transaction, so a concurrent writer could in principle delete an event row in that window; the delete itself only matches rows carrying the backfill marker. |
-| 29 | `202611280004_dua_task_lineage_event_backfill.sql` | Backfills the five Orhan task lineage values (`parent_task_id`, `root_task_id`, `continue_thread_id`, `attempt`, `idempotency_key`) into `dua_task_events.detail` for every task that already carries at least one of them, so the columns added by file 25 become a cache over the event stream | YES | `202611280004_dua_task_lineage_event_backfill.rollback.sql` beside it, hand written: drop the append-only trigger, delete only the rows carrying the `202611280004_dua_task_lineage_event_backfill` marker, then recreate the trigger | Data loss: none. The five values still live in `dua_orhan_tasks`, which this file only read. The rollback deletes only its own backfilled rows, so events written by the API and the `202611280003` backfill are untouched. |
-| 30 | `202611280005_dua_memories_scope_history.sql` | Creates `dua_memories_scope_history`, an append-only table that records the old and new `scope` and `source_conversation_id` of every `dua_memories` row, plus the `dua_memories_scope_record` trigger, the `dua_memories_scope_history_immutable` guard and a baseline row per existing memory. This is the forward fix for file 18, so the two columns become a cache over the history | YES | `202611280005_dua_memories_scope_history.rollback.sql` beside it, hand written because no existing function body changes: drop the `dua_memories_scope_record` trigger, drop the append-only trigger, drop both functions, then drop the table | Data loss: the recorded history is deleted, which is the point of the rollback. `dua_memories` is never touched, so every current `scope` and `source_conversation_id` value stays. What is lost is the ability to recover a scope after file 18's columns are dropped. |
+| 26 | `202611280001_dua_function_history.sql` | Creates `dua_function_history`, the `dua_capture_function` helper and two indexes, and captures the current body of eleven workflow functions | YES | `supabase/rollbacks/202611280001_dua_function_history.rollback.sql`: drop the helper, the two indexes, then the table | Data loss: every captured function definition is deleted, so a function replaced after this migration loses its restore point. Export the table first if a body is still needed. The table is inert until a migration calls the helper, so the rollback cannot break a running workflow. |
+| 27 | `202611280002_dua_quota_rpc_dispatch.sql` | Moves the `dua_consume_imagine` and `dua_start_voice_session` bodies to `_v2` names and leaves the public names as thin dispatchers, so a future signature change is a swap instead of a `drop function` | YES | `supabase/rollbacks/202611280002_dua_quota_rpc_dispatch.rollback.sql`, generated from `dua_function_history`: restore both public bodies, then `drop function` the two `_v2` names | Data loss: none. Quota counters and voice sessions are untouched, and the dispatcher passes every argument through unchanged. The rollback drops the `_v2` functions, so a caller that started using `_v2` directly would break; the API calls the public names only. |
+| 28 | `202611280003_dua_task_links_event_backfill.sql` | Copies `end_reason`, `finished_at_ms` and `stopped_at_ms` from `dua_orhan_tasks` into one `dua_task_events` row per finished task, so the three columns from file 24 become a cache instead of the only copy | YES | `supabase/rollbacks/202611280003_dua_task_links_event_backfill.rollback.sql`, hand written because no function body changes: drop the append-only trigger, delete the rows marked `backfill_migration = 202611280003`, recreate the trigger | Data loss: none. The three values stay in `dua_orhan_tasks`, which this file only reads. The rollback has to drop the append-only trigger for the length of one transaction, so a concurrent writer could in principle delete an event row in that window; the delete itself only matches rows carrying the backfill marker. |
+| 29 | `202611280004_dua_task_lineage_event_backfill.sql` | Backfills the five Orhan task lineage values (`parent_task_id`, `root_task_id`, `continue_thread_id`, `attempt`, `idempotency_key`) into `dua_task_events.detail` for every task that already carries at least one of them, so the columns added by file 25 become a cache over the event stream | YES | `supabase/rollbacks/202611280004_dua_task_lineage_event_backfill.rollback.sql`, hand written: drop the append-only trigger, delete only the rows carrying the `202611280004_dua_task_lineage_event_backfill` marker, then recreate the trigger | Data loss: none. The five values still live in `dua_orhan_tasks`, which this file only read. The rollback deletes only its own backfilled rows, so events written by the API and the `202611280003` backfill are untouched. |
+| 30 | `202611280005_dua_memories_scope_history.sql` | Creates `dua_memories_scope_history`, an append-only table that records the old and new `scope` and `source_conversation_id` of every `dua_memories` row, plus the `dua_memories_scope_record` trigger, the `dua_memories_scope_history_immutable` guard and a baseline row per existing memory. This is the forward fix for file 18, so the two columns become a cache over the history | YES | `supabase/rollbacks/202611280005_dua_memories_scope_history.rollback.sql`, hand written because no existing function body changes: drop the `dua_memories_scope_record` trigger, drop the append-only trigger, drop both functions, then drop the table | Data loss: the recorded history is deleted, which is the point of the rollback. `dua_memories` is never touched, so every current `scope` and `source_conversation_id` value stays. What is lost is the ability to recover a scope after file 18's columns are dropped. |
 
 ## The six that cannot be rolled back
 
@@ -136,7 +141,7 @@ order, with these extra constraints:
 
 ## What this document does not do
 
-- It does not add rollback files. It records that none exist.
-- It does not change any migration. Every file is untouched.
-- It does not claim any rollback was tested. No rollback script was run against a database,
-  because no rollback script exists yet and no staging database was available in this run.
+- It does not add rollback files. The five that exist are in `supabase/rollbacks/`.
+- It does not change any forward migration. Every file in `supabase/migrations/` stays untouched.
+- It does not claim any rollback was run by this inventory. Applying one needs an explicit
+  owner yes and a staging database. Do not use `supabase db push` to run a rollback.
