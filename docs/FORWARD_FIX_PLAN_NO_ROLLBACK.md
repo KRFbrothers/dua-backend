@@ -1,11 +1,43 @@
 # Forward fix plan for the six migrations that cannot be rolled back
 
-`supabase/migrations/ROLLBACK_STATUS.md` records 25 migrations, 19 rollback-able and 6 not.
-This file is the plan for those 6. It is a plan only: no migration file is added, edited or
-deleted here, and no existing file is changed.
+`supabase/migrations/ROLLBACK_STATUS.md` records 30 migrations, 24 rollback-able and 6 not.
+This file is the plan for those 6. All six forward fixes have since shipped, so this file is now
+the record of what was done and why, not a to-do list. The six original files are still marked
+NO in `ROLLBACK_STATUS.md`, and that is correct: a forward fix does not make the original file
+reversible, it makes the next change reversible and keeps the data that a drop would lose.
 
 Read it as: what exactly is irreversible in each file, what a new migration would have to do so
 that the same change is reversible next time, and in what order to do it.
+
+## Current status
+
+Every row below is taken from a merged PR on `main`, not from a plan. The forward fix migration
+column is the file that actually landed.
+
+| # | Migration file | Forward fix migration | PR | Status |
+| --- | --- | --- | --- | --- |
+| 1 | `20261102183410_workflow_identity_recovery.sql` | `202611280001_dua_function_history.sql` | #58 | shipped |
+| 2 | `202611160001_owner_scoped_quota_rpcs.sql` | `202611280002_dua_quota_rpc_dispatch.sql` | #60 | shipped |
+| 3 | `202611190003_dua_memories_scope.sql` | `202611280005_dua_memories_scope_history.sql` | #64 | shipped |
+| 4 | `202611250001_dua_orhan_tasks_lifecycle.sql` | `202611280003_dua_task_links_event_backfill.sql` | #61 | shipped, API half in #65 |
+| 5 | `202611260001_workflow_rpcs_authenticated.sql` | `202611280001_dua_function_history.sql` plus the rollback generator | #58, #59 | shipped |
+| 6 | `202611270001_dua_task_lifecycle_workers.sql` | `202611280004_dua_task_lineage_event_backfill.sql` | #62 | shipped |
+
+Item 4 needed two halves. The migration half (`202611280003`) backfilled the existing rows. The
+API half landed in PR #65: `apps/api/src/core/task-events.mjs` now whitelists `end_reason`,
+`finished_at_ms` and `stopped_at_ms`, and the completed, failed, cancelled, finish and reaped
+paths write them into `detail`. Without that half the columns were a cache only for backfilled
+rows, not for new ones.
+
+Item 6 also needed an API half, and it landed in PR #63: the four lineage keys
+(`parent_task_id`, `root_task_id`, `continue_thread_id`, `idempotency_key`) are whitelisted and
+written on create.
+
+Note on the numbering. The plan numbers the lifecycle file (three columns) as item 4 and the
+lineage file (five columns) as item 6. The migration file headers say the opposite: the header
+of `202611280003` calls itself item 6 and the header of `202611280004` calls itself item 4. The
+content is what counts, and the table above follows the content: `202611280003` backfills
+`end_reason`, `finished_at_ms` and `stopped_at_ms`, which is this plan's item 4.
 
 ## Summary
 
@@ -43,7 +75,7 @@ captured function version, and a helper captures `pg_get_functiondef` into it. E
 `create or replace` calls the helper first, so the body that is about to be overwritten is on
 disk before it is gone. Rollback then re-applies the captured body instead of guessing.
 
-**Proposed file name.** `202612010001_dua_function_history.sql`
+**Landed as.** `202611280001_dua_function_history.sql` (PR #58).
 
 **SQL sketch.**
 
@@ -99,7 +131,7 @@ voice with no RPC, and the API already calls the new `owner` shape.
 name and keep the public name as a thin dispatcher. A rollback then re-points the dispatcher,
 which is a one line change, instead of recreating a dropped signature.
 
-**Proposed file name.** `202612010002_dua_quota_rpc_dispatch.sql`
+**Landed as.** `202611280002_dua_quota_rpc_dispatch.sql` (PR #60).
 
 **SQL sketch.**
 
@@ -146,7 +178,7 @@ be rebuilt from anything else: `apps/api/src/core/artifacts-memories.mjs` line 1
 the assignment survives even if the columns are later dropped. The columns then become a cache
 over the history.
 
-**Proposed file name.** `202612010003_dua_memories_scope_history.sql`
+**Landed as.** `202611280005_dua_memories_scope_history.sql` (PR #64).
 
 **SQL sketch.**
 
@@ -208,7 +240,7 @@ adds. Backfill one event per existing task carrying the three values in `detail`
 API append an event whenever it writes them. Then the columns are a cache and a drop is
 recoverable.
 
-**Proposed file name.** `202612010004_dua_orhan_task_events_backfill.sql`
+**Landed as.** `202611280003_dua_task_links_event_backfill.sql` (PR #61), with the API half in PR #65.
 
 **SQL sketch.**
 
@@ -264,7 +296,7 @@ access it closed.
 function list and writes the matching `.rollback.sql` beside it. That turns the AGENTS.md 4.11
 rule from a manual promise into a generated artifact.
 
-**Proposed file name.** `202612010005_workflow_rpc_history_capture.sql`
+**Landed as.** `202611280001_dua_function_history.sql` (PR #58) plus the rollback generator (PR #59).
 
 **SQL sketch.**
 
@@ -308,7 +340,7 @@ anything.
 `created` event for each existing task that carries them. Then the columns are a cache over the
 event stream, and the event stream is the durable record.
 
-**Proposed file name.** `202612010006_dua_task_links_event_backfill.sql`
+**Landed as.** `202611280004_dua_task_lineage_event_backfill.sql` (PR #62), with the API half in PR #63.
 
 **SQL sketch.**
 
@@ -350,6 +382,9 @@ fields into `detail` is a second commit and needs a test that the event and the 
 Items 1 and 5 are one mechanism, so they should be one PR. Items 4 and 6 both write to
 `dua_task_events`, so they should be one PR after 6 lands.
 
+This order was followed and is kept for the record. All six items are shipped, so nothing here is
+still waiting on a dependency.
+
 ## Pattern for new migrations
 
 This is the same rule `AGENTS.md` 4.11 and `CONTRIBUTING.md` section 5 already state, written as
@@ -387,7 +422,13 @@ worth stating plainly:
 
 ## What this file does not do
 
-- It adds no migration. Every SQL block above is a sketch for a future file.
-- It changes no existing file. `ROLLBACK_STATUS.md` still says 6 of 25 cannot be rolled back, and
-  that stays true until the migrations above actually land.
-- It does not claim any of these fixes has been tested. None has been run against a database.
+- It adds no migration. Every SQL block above is a sketch of what landed, kept so a reader can
+  see the shape without opening the migration.
+- It changes no existing file. `ROLLBACK_STATUS.md` still says 6 of 30 cannot be rolled back, and
+  that stays true: the six original files are still irreversible, the forward fixes only make the
+  next change reversible and keep the data a drop would lose.
+- It does not claim the fixes were run against Supabase. What was actually run: every forward fix
+  migration was applied on a local PostgreSQL 15 with `auth` and `storage` stubs, together with
+  all the other migrations, and the backfills, the append-only guards and the rollbacks were
+  exercised there. `supabase db push` against the real project has not been run, because it needs
+  owner approval. So the SQL is tested, the production apply is not.
