@@ -32,7 +32,7 @@ export function makeServer({ key = process.env.GEMINI_API_KEY, model = process.e
     res.on?.('close', onDisconnect);
     try {
       const url = new URL(req.url, 'http://localhost');
-      if (url.pathname.startsWith('/api/')) {
+      if (url.pathname.startsWith('/api/') || url.pathname === '/healthz' || url.pathname === '/readyz') {
         const chunks = []; let size = 0;
         for await (const chunk of req) {
           size += chunk.length;
