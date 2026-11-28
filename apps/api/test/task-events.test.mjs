@@ -59,6 +59,53 @@ test('detail is filtered to the allowlist, so prompt text and output never persi
   assert.ok(!JSON.stringify(db.inserts).includes('secret'));
 });
 
+test('the four lineage keys survive safeDetail, so the trail can answer where a task came from', async () => {
+  const db = fakeDb();
+  const append = createTaskEventWriter({ db, ownerId: OWNER, taskId: TASK });
+  const parent = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
+  const thread = 'cccccccc-dddd-4eee-8fff-000000000000';
+  await append('created', {
+    parent_task_id: parent,
+    root_task_id: parent,
+    continue_thread_id: thread,
+    idempotency_key: 'client-key-1',
+    status: 'waiting',
+  });
+  const detail = db.inserts[0].detail;
+  assert.deepEqual(Object.keys(detail).sort(), [
+    'continue_thread_id', 'idempotency_key', 'parent_task_id', 'root_task_id', 'status',
+  ]);
+  assert.equal(detail.parent_task_id, parent);
+  assert.equal(detail.root_task_id, parent);
+  assert.equal(detail.continue_thread_id, thread);
+  assert.equal(detail.idempotency_key, 'client-key-1');
+});
+
+test('the lineage keys do not open the allowlist: unknown keys are still dropped', async () => {
+  const db = fakeDb();
+  const append = createTaskEventWriter({ db, ownerId: OWNER, taskId: TASK });
+  await append('created', {
+    parent_task_id: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff',
+    rootTaskId: 'camelCase is not the backfilled name',
+    continueThreadId: 'camelCase is not the backfilled name',
+    idempotencyKey: 'camelCase is not the backfilled name',
+    prompt: 'secret user prompt',
+    output: 'secret model output',
+    apiKey: 'sk-secret',
+  });
+  const detail = db.inserts[0].detail;
+  assert.deepEqual(Object.keys(detail), ['parent_task_id']);
+  assert.ok(!JSON.stringify(db.inserts).includes('secret'));
+});
+
+test('a lineage value longer than 200 characters is dropped, not truncated', async () => {
+  const db = fakeDb();
+  const append = createTaskEventWriter({ db, ownerId: OWNER, taskId: TASK });
+  await append('created', { idempotency_key: 'k'.repeat(201), parent_task_id: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff' });
+  const detail = db.inserts[0].detail;
+  assert.deepEqual(Object.keys(detail), ['parent_task_id']);
+});
+
 test('a failed sequence call or insert returns false and never throws', async () => {
   const seqDb = fakeDb({ seqFails: true });
   assert.equal(await createTaskEventWriter({ db: seqDb, ownerId: OWNER, taskId: TASK })('created'), false);

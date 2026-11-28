@@ -20,6 +20,10 @@ const EVENTS = new Set([
 const DETAIL_KEYS = new Set([
   'stepId', 'stepIndex', 'stepCount', 'runCount', 'attempt', 'endReason',
   'status', 'fromStatus', 'toStatus', 'workerId', 'durationMs', 'parentTaskId',
+  // Task lineage, spelled exactly as 202611280004_dua_task_lineage_event_backfill.sql
+  // writes it into dua_task_events.detail, so a reader can query one name for both
+  // backfilled rows and rows the API writes from now on.
+  'parent_task_id', 'root_task_id', 'continue_thread_id', 'idempotency_key',
 ]);
 
 function safeDetail(detail) {
